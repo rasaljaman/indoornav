@@ -1,8 +1,16 @@
 import { MousePointer2, Square, Circle, TrendingUp, Scaling, Save, Image as ImageIcon, QrCode } from 'lucide-react';
 
-export default function MapToolbar({ currentTool, setTool, onSave, onUploadPlan }) {
+const NODE_TYPES = [
+  { id: 'junction', label: 'Junction', color: '#1A73E8' },
+  { id: 'stairs', label: 'Stairs', color: '#F97316' },
+  { id: 'lift', label: 'Lift', color: '#8B5CF6' },
+  { id: 'entrance', label: 'Entrance', color: '#EF4444' },
+  { id: 'room_door', label: 'Room Door', color: '#10B981' },
+];
+
+export default function MapToolbar({ currentTool, setTool, nodeType, setNodeType, onSave, onUploadPlan }) {
   const tools = [
-    { id: 'select', icon: MousePointer2, label: 'Select' },
+    { id: 'select', icon: MousePointer2, label: 'Select / Pan' },
     { id: 'room', icon: Square, label: 'Draw Room' },
     { id: 'node', icon: Circle, label: 'Add Node' },
     { id: 'edge', icon: TrendingUp, label: 'Draw Path' },
@@ -17,8 +25,8 @@ export default function MapToolbar({ currentTool, setTool, onSave, onUploadPlan 
           key={id}
           onClick={() => setTool(id)}
           className={`p-3 rounded-xl transition-all duration-200 group relative ${
-            currentTool === id 
-              ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]' 
+            currentTool === id
+              ? 'bg-blue-500 text-white shadow-[0_0_15px_rgba(59,130,246,0.5)]'
               : 'text-gray-400 hover:bg-white/10 hover:text-white'
           }`}
           title={label}
@@ -29,6 +37,40 @@ export default function MapToolbar({ currentTool, setTool, onSave, onUploadPlan 
           </span>
         </button>
       ))}
+
+      {/* Node Type Sub-selector (visible when node tool is active) */}
+      {currentTool === 'node' && (
+        <div style={{
+          borderTop: '1px solid rgba(255,255,255,0.1)',
+          paddingTop: '8px',
+          marginTop: '4px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '2px',
+        }}>
+          {NODE_TYPES.map(nt => (
+            <button
+              key={nt.id}
+              onClick={() => setNodeType(nt.id)}
+              style={{
+                padding: '6px 10px',
+                borderRadius: '8px',
+                border: nodeType === nt.id ? `2px solid ${nt.color}` : '1px solid transparent',
+                background: nodeType === nt.id ? `${nt.color}20` : 'transparent',
+                color: nodeType === nt.id ? nt.color : '#9ca3af',
+                cursor: 'pointer',
+                fontSize: '0.7rem',
+                fontWeight: nodeType === nt.id ? 600 : 400,
+                textAlign: 'left',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s',
+              }}
+            >
+              {nt.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="h-px bg-white/10 my-2" />
 

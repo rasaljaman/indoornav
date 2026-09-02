@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { ArrowLeft, Loader2, ChevronDown } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import MapToolbar from '../../components/map/MapToolbar';
 import CanvasManager from '../../components/map/CanvasManager';
+import RoomPropertiesPanel from '../../components/map/RoomPropertiesPanel';
 
 export default function MapEditor() {
   const { buildingId, floorId } = useParams();
@@ -11,17 +12,30 @@ export default function MapEditor() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  
+
   const [currentTool, setCurrentTool] = useState('select');
+  const [nodeType, setNodeType] = useState('junction');
   const [floorData, setFloorData] = useState(null);
   const [blueprintUrl, setBlueprintUrl] = useState(null);
   const [orgSlug, setOrgSlug] = useState(null);
+
+  // Floor tabs
+  const [allFloors, setAllFloors] = useState([]);
+  const [showFloorPicker, setShowFloorPicker] = useState(false);
 
   // Map Data State
   const [rooms, setRooms] = useState([]);
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [qrPoints, setQrPoints] = useState([]);
+
+  // Selection
+  const [selectedRoomId, setSelectedRoomId] = useState(null);
+
+  // Deletion tracking
+  const [deletedRoomIds, setDeletedRoomIds] = useState([]);
+  const [deletedNodeIds, setDeletedNodeIds] = useState([]);
+  const [deletedEdgeIds, setDeletedEdgeIds] = useState([]);
 
   useEffect(() => {
     async function loadFloorData() {
@@ -37,6 +51,14 @@ export default function MapEditor() {
         if (floorErr) throw floorErr;
         setFloorData(floor);
 
+        // Load all floors for this building (for floor tabs)
+        const { data: floorsData } = await supabase
+          .from('floors')
+          .select('id, name, level')
+          .eq('building_id', floor.building_id || buildingId)
+          .order('level');
+        setAllFloors(floorsData || []);
+
         // Load Rooms
         const { data: roomsData } = await supabase
           .from('rooms')
@@ -51,7 +73,7 @@ export default function MapEditor() {
           .eq('floor_id', floorId);
         if (nodesData) setNodes(nodesData);
 
-        // Load Edges
+        // Load Edges & QR Points
         if (nodesData && nodesData.length > 0) {
           const nodeIds = nodesData.map(n => n.id);
           const { data: edgesData } = await supabase
@@ -71,7 +93,7 @@ export default function MapEditor() {
         const { data: bldg } = await supabase
           .from('buildings')
           .select('org_id')
-          .eq('id', floorData ? floorData.building_id : buildingId)
+          .eq('id', floor.building_id || buildingId)
           .single();
         if (bldg) {
           const { data: org } = await supabase
@@ -81,21 +103,45 @@ export default function MapEditor() {
             .single();
           if (org) setOrgSlug(org.slug);
         }
-
       } catch (err) {
         console.error('Failed to load floor data:', err);
       } finally {
         setLoading(false);
       }
     }
+
+    // Reset state when switching floors
+    setRooms([]);
+    setNodes([]);
+    setEdges([]);
+    setQrPoints([]);
+    setDeletedRoomIds([]);
+    setDeletedNodeIds([]);
+    setDeletedEdgeIds([]);
+    setSelectedRoomId(null);
+
     loadFloorData();
-  }, [floorId]);
+  }, [floorId, buildingId]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Very basic save implementation: upsert rooms and nodes
-      // Note: Real implementation would need to diff deletions as well
+      // 1. Delete removed items first
+      if (deletedEdgeIds.length > 0) {
+        await supabase.from('edges').delete().in('id', deletedEdgeIds);
+      }
+      if (deletedRoomIds.length > 0) {
+        await supabase.from('rooms').delete().in('id', deletedRoomIds);
+      }
+      // Delete QR points for deleted nodes first
+      if (deletedNodeIds.length > 0) {
+        await supabase.from('qr_points').delete().in('node_id', deletedNodeIds);
+        await supabase.from('edges').delete().in('from_node', deletedNodeIds);
+        await supabase.from('edges').delete().in('to_node', deletedNodeIds);
+        await supabase.from('nodes').delete().in('id', deletedNodeIds);
+      }
+
+      // 2. Upsert remaining items
       if (rooms.length > 0) {
         const roomsToSave = rooms.map(r => ({ ...r, floor_id: floorId }));
         await supabase.from('rooms').upsert(roomsToSave);
@@ -107,7 +153,7 @@ export default function MapEditor() {
       if (edges.length > 0) {
         let pixelsPerMeter = 1;
         if (floorData && floorData.real_width_m) {
-          pixelsPerMeter = 1920 / floorData.real_width_m;
+          pixelsPerMeter = (floorData.map_width || 1920) / floorData.real_width_m;
         }
 
         const edgesToSave = edges.map(edge => {
@@ -121,9 +167,14 @@ export default function MapEditor() {
           }
           return edge;
         });
-
         await supabase.from('edges').upsert(edgesToSave);
       }
+
+      // 3. Clear deletion tracking
+      setDeletedRoomIds([]);
+      setDeletedNodeIds([]);
+      setDeletedEdgeIds([]);
+
       alert('Map saved successfully!');
     } catch (err) {
       console.error('Save failed:', err);
@@ -134,7 +185,6 @@ export default function MapEditor() {
   };
 
   const handleUploadPlan = () => {
-    // Phase 1 shortcut: ask for URL instead of full file upload to keep it simple for now
     const url = prompt('Enter the URL of the floor plan image (e.g. from Imgur or a public link):');
     if (url) {
       setBlueprintUrl(url);
@@ -142,7 +192,6 @@ export default function MapEditor() {
   };
 
   const handleScaleCalibrated = async (pts) => {
-    // pts = [x1, y1, x2, y2]
     const dx = pts[2] - pts[0];
     const dy = pts[3] - pts[1];
     const pixelDistance = Math.sqrt(dx * dx + dy * dy);
@@ -151,20 +200,19 @@ export default function MapEditor() {
     if (meterInput && !isNaN(meterInput)) {
       const meters = parseFloat(meterInput);
       const pixelsPerMeter = pixelDistance / meters;
-      
-      // Calculate real width/height of the map based on the 1920x1080 default grid for now
-      // Or if there's an image, based on image size. Let's assume 1920x1080 canvas for now.
-      const realWidth = 1920 / pixelsPerMeter;
-      const realHeight = 1080 / pixelsPerMeter;
+      const mapW = floorData?.map_width || 1920;
+      const mapH = floorData?.map_height || 1080;
+      const realWidth = mapW / pixelsPerMeter;
+      const realHeight = mapH / pixelsPerMeter;
 
       try {
         await supabase
           .from('floors')
           .update({ real_width_m: realWidth, real_height_m: realHeight })
           .eq('id', floorId);
-        
+
         setFloorData(prev => ({ ...prev, real_width_m: realWidth, real_height_m: realHeight }));
-        alert(`Scale calibrated! Map is now ${realWidth.toFixed(2)}m x ${realHeight.toFixed(2)}m.`);
+        alert(`Scale calibrated! Map is now ${realWidth.toFixed(2)}m × ${realHeight.toFixed(2)}m.`);
       } catch (err) {
         console.error('Error saving scale:', err);
       }
@@ -177,8 +225,7 @@ export default function MapEditor() {
       alert("Organization slug not loaded yet. Please wait.");
       return;
     }
-    
-    // Check if it already has a QR
+
     const existing = qrPoints.find(q => q.node_id === nodeId);
     if (existing) {
       if (confirm("This node already has a QR code assigned. Delete it?")) {
@@ -188,7 +235,6 @@ export default function MapEditor() {
       return;
     }
 
-    // Auto-generate URL
     const baseUrl = window.location.origin;
     const qrValue = `${baseUrl}/${orgSlug}?loc=${nodeId}`;
 
@@ -197,13 +243,45 @@ export default function MapEditor() {
       .insert([{ node_id: nodeId, qr_code_value: qrValue }])
       .select()
       .single();
-    
+
     if (error) {
       alert("Failed to assign QR: " + error.message);
     } else {
       setQrPoints([...qrPoints, newQr]);
     }
   };
+
+  // Delete handlers
+  const handleDeleteRoom = (roomId) => {
+    setDeletedRoomIds(prev => [...prev, roomId]);
+    setRooms(prev => prev.filter(r => r.id !== roomId));
+    setSelectedRoomId(null);
+  };
+
+  const handleDeleteNode = (nodeId) => {
+    // Also remove edges connected to this node
+    const connectedEdges = edges.filter(e => e.from_node === nodeId || e.to_node === nodeId);
+    setDeletedEdgeIds(prev => [...prev, ...connectedEdges.map(e => e.id)]);
+    setEdges(prev => prev.filter(e => e.from_node !== nodeId && e.to_node !== nodeId));
+
+    // Remove QR points for this node
+    setQrPoints(prev => prev.filter(q => q.node_id !== nodeId));
+
+    setDeletedNodeIds(prev => [...prev, nodeId]);
+    setNodes(prev => prev.filter(n => n.id !== nodeId));
+  };
+
+  const handleDeleteEdge = (edgeId) => {
+    setDeletedEdgeIds(prev => [...prev, edgeId]);
+    setEdges(prev => prev.filter(e => e.id !== edgeId));
+  };
+
+  // Room update handler
+  const handleRoomUpdate = (updatedRoom) => {
+    setRooms(prev => prev.map(r => r.id === updatedRoom.id ? updatedRoom : r));
+  };
+
+  const selectedRoom = rooms.find(r => r.id === selectedRoomId);
 
   if (loading) {
     return (
@@ -217,19 +295,72 @@ export default function MapEditor() {
     <div className="fixed inset-0 overflow-hidden bg-black text-white">
       {/* Top Navbar overlay */}
       <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-black/80 to-transparent flex items-center px-6 z-20 pointer-events-none">
-        <button 
-          onClick={() => navigate(-1)}
+        <button
+          onClick={() => navigate('/admin')}
           className="pointer-events-auto flex items-center gap-2 text-gray-300 hover:text-white transition-colors"
         >
           <ArrowLeft size={20} />
-          Back to Dashboard
+          Dashboard
         </button>
-        <div className="ml-auto pointer-events-auto flex items-center gap-4">
-          <span className="font-semibold">{floorData?.name || 'Map Editor'}</span>
-          {floorData?.real_width_m && (
-            <span className="text-xs bg-white/20 px-2 py-1 rounded">Scale Set</span>
+        <div className="ml-auto pointer-events-auto flex items-center gap-3">
+          {/* Floor Selector */}
+          {allFloors.length > 1 && (
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowFloorPicker(!showFloorPicker)}
+                className="flex items-center gap-1 text-sm bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                {floorData?.name || 'Floor'}
+                <ChevronDown size={14} />
+              </button>
+              {showFloorPicker && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  right: 0,
+                  marginTop: '4px',
+                  background: 'rgba(10,10,15,0.95)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '10px',
+                  padding: '4px',
+                  minWidth: '180px',
+                  zIndex: 50,
+                  backdropFilter: 'blur(20px)',
+                }}>
+                  {allFloors.map(f => (
+                    <button
+                      key={f.id}
+                      onClick={() => {
+                        setShowFloorPicker(false);
+                        navigate(`/admin/buildings/${buildingId}/floors/${f.id}/editor`);
+                      }}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: 'none',
+                        background: f.id === floorId ? 'rgba(59,130,246,0.2)' : 'transparent',
+                        color: f.id === floorId ? '#60a5fa' : '#d1d5db',
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        fontFamily: 'inherit',
+                      }}
+                    >
+                      L{f.level} — {f.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
-          <button 
+
+          <span className="font-semibold text-sm">{floorData?.name || 'Map Editor'}</span>
+          {floorData?.real_width_m && (
+            <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Scale Set</span>
+          )}
+          <button
             onClick={() => navigate(`/admin/buildings/${buildingId}/floors/${floorId}/print-qrs`)}
             className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors"
           >
@@ -240,26 +371,42 @@ export default function MapEditor() {
       </div>
 
       {/* Toolbar */}
-      <MapToolbar 
-        currentTool={currentTool} 
-        setTool={setCurrentTool} 
+      <MapToolbar
+        currentTool={currentTool}
+        setTool={setCurrentTool}
+        nodeType={nodeType}
+        setNodeType={setNodeType}
         onSave={handleSave}
         onUploadPlan={handleUploadPlan}
       />
 
       {/* Canvas Area */}
-      <CanvasManager 
+      <CanvasManager
         currentTool={currentTool}
+        nodeType={nodeType}
         blueprintUrl={blueprintUrl}
         rooms={rooms}
         nodes={nodes}
         edges={edges}
         qrPoints={qrPoints}
+        selectedRoomId={selectedRoomId}
         onRoomsChange={setRooms}
         onNodesChange={setNodes}
         onEdgesChange={setEdges}
         onScaleCalibrated={handleScaleCalibrated}
         onNodeQrClick={handleNodeQrClick}
+        onRoomSelect={setSelectedRoomId}
+        onDeleteRoom={handleDeleteRoom}
+        onDeleteNode={handleDeleteNode}
+        onDeleteEdge={handleDeleteEdge}
+      />
+
+      {/* Room Properties Panel */}
+      <RoomPropertiesPanel
+        room={selectedRoom}
+        onUpdate={handleRoomUpdate}
+        onDelete={handleDeleteRoom}
+        onClose={() => setSelectedRoomId(null)}
       />
     </div>
   );

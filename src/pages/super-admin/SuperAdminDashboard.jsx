@@ -9,6 +9,13 @@ export default function SuperAdminDashboard() {
   const [formError, setFormError] = useState('');
   const [formLoading, setFormLoading] = useState(false);
 
+  // Invite Admin state
+  const [invitingOrgId, setInvitingOrgId] = useState(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [invitePassword, setInvitePassword] = useState('');
+  const [inviteError, setInviteError] = useState('');
+  const [inviteLoading, setInviteLoading] = useState(false);
+
   useEffect(() => {
     loadOrganizations();
   }, []);
@@ -93,6 +100,45 @@ export default function SuperAdminDashboard() {
     }
   }
 
+  async function handleInviteAdmin(e) {
+    e.preventDefault();
+    setInviteError('');
+    setInviteLoading(true);
+
+    try {
+      // 1. Sign up the user in Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: inviteEmail.trim(),
+        password: invitePassword,
+      });
+
+      if (authError) throw authError;
+
+      if (!authData?.user) {
+        throw new Error('User creation failed or requires email confirmation.');
+      }
+
+      // 2. Add entry to admins table
+      const { error: adminError } = await supabase.from('admins').insert({
+        org_id: invitingOrgId,
+        email: inviteEmail.trim(),
+        role: 'org_admin',
+        auth_id: authData.user.id,
+      });
+
+      if (adminError) throw adminError;
+
+      alert(`Org Admin created successfully for ${inviteEmail}!`);
+      setInvitingOrgId(null);
+      setInviteEmail('');
+      setInvitePassword('');
+    } catch (err) {
+      setInviteError(err.message);
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
   const orgTypeIcon = {
     college: '🎓',
     hospital: '🏥',
@@ -156,7 +202,7 @@ export default function SuperAdminDashboard() {
         ))}
       </div>
 
-      {/* Create Organization */}
+      {/* Create Organization Header */}
       <div style={{
         display: 'flex',
         alignItems: 'center',
@@ -249,6 +295,73 @@ export default function SuperAdminDashboard() {
         </div>
       )}
 
+      {/* Invite Admin Modal */}
+      {invitingOrgId && (
+        <div className="glass-card animate-slide-up" style={{ padding: '24px', marginBottom: '20px', borderColor: 'var(--color-accent-blue)' }}>
+          <h3 style={{ fontWeight: 600, marginBottom: '16px' }}>Invite Org Admin</h3>
+
+          {inviteError && (
+            <div style={{
+              padding: '10px 14px',
+              borderRadius: '8px',
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.2)',
+              color: 'var(--color-error)',
+              fontSize: '0.85rem',
+              marginBottom: '16px',
+            }}>
+              {inviteError}
+            </div>
+          )}
+
+          <form onSubmit={handleInviteAdmin}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+              <div>
+                <label className="input-label">Admin Email</label>
+                <input
+                  type="email"
+                  className="input-field"
+                  placeholder="admin@org.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  required
+                />
+              </div>
+              <div>
+                <label className="input-label">Initial Password</label>
+                <input
+                  type="password"
+                  className="input-field"
+                  placeholder="••••••••"
+                  value={invitePassword}
+                  onChange={(e) => setInvitePassword(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={inviteLoading}
+                style={{ padding: '8px 20px', fontSize: '0.85rem' }}
+              >
+                {inviteLoading ? 'Creating Account...' : 'Create Admin User'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setInvitingOrgId(null)}
+                style={{ padding: '8px 16px', fontSize: '0.85rem' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Organizations List */}
       {organizations.length === 0 ? (
         <div className="glass-card" style={{ padding: '48px', textAlign: 'center' }}>
@@ -302,6 +415,16 @@ export default function SuperAdminDashboard() {
                 <button
                   className="btn-secondary"
                   style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+                  onClick={() => {
+                    setInvitingOrgId(org.id);
+                    setInviteError('');
+                  }}
+                >
+                  + Add Admin
+                </button>
+                <button
+                  className="btn-secondary"
+                  style={{ padding: '6px 14px', fontSize: '0.8rem', color: 'var(--color-error)' }}
                   onClick={() => handleDeleteOrg(org.id, org.name)}
                 >
                   Delete

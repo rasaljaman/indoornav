@@ -1,5 +1,13 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text } from 'react-konva';
+
+// Node type visual config
+const NODE_STYLES = {
+  junction:  { fill: '#FFFFFF', stroke: '#1A73E8', label: 'J' },
+  stairs:    { fill: '#FED7AA', stroke: '#F97316', label: 'S' },
+  lift:      { fill: '#DDD6FE', stroke: '#8B5CF6', label: 'L' },
+  entrance:  { fill: '#FECACA', stroke: '#EF4444', label: 'E' },
+  room_door: { fill: '#BBF7D0', stroke: '#10B981', label: 'D' },
+};
 
 // Google Maps Aesthetic Theme
 const THEME = {
@@ -22,22 +30,28 @@ const THEME = {
   }
 };
 
-export default function CanvasManager({ 
-  currentTool, 
-  blueprintUrl, 
-  rooms, 
-  nodes, 
+export default function CanvasManager({
+  currentTool,
+  nodeType = 'junction',
+  blueprintUrl,
+  rooms,
+  nodes,
   edges,
   qrPoints = [],
+  selectedRoomId,
   onRoomsChange,
   onNodesChange,
   onEdgesChange,
   onScaleCalibrated,
-  onNodeQrClick
+  onNodeQrClick,
+  onRoomSelect,
+  onDeleteRoom,
+  onDeleteNode,
+  onDeleteEdge,
 }) {
   const stageRef = useRef(null);
   const [image, setImage] = useState(null);
-  
+
   // Viewport State
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -53,15 +67,32 @@ export default function CanvasManager({
     if (!blueprintUrl) return;
     const img = new window.Image();
     img.src = blueprintUrl;
+    img.crossOrigin = 'anonymous';
     img.onload = () => setImage(img);
   }, [blueprintUrl]);
+
+  // Keyboard handler for Delete
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Don't delete if typing in an input
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        if (selectedRoomId && onDeleteRoom) {
+          onDeleteRoom(selectedRoomId);
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedRoomId, onDeleteRoom]);
 
   // Handle Zoom
   const handleWheel = useCallback((e) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
     if (!stage) return;
-    
+
     const scaleBy = 1.1;
     const oldScale = stage.scaleX();
     const pointer = stage.getPointerPosition();
@@ -92,12 +123,8 @@ export default function CanvasManager({
 
   // Handle Canvas Click based on Tool
   const handleStageClick = (e) => {
-    // If we're dragging or panning, ignore
     if (e.evt.button === 1 || e.evt.button === 2) return;
-    
-    // If clicking on a shape, e.target is the shape. For stage click, we just want empty areas for rooms/nodes
-    // Actually, react-konva bubbles events. We'll handle node clicks separately.
-    
+
     const stage = e.target.getStage();
     const pointerPosition = stage.getPointerPosition();
     const x = (pointerPosition.x - stage.x()) / stage.scaleX();
@@ -110,16 +137,21 @@ export default function CanvasManager({
         id: crypto.randomUUID(),
         x,
         y,
-        type: 'junction'
+        type: nodeType,
       };
       onNodesChange([...nodes, newNode]);
     } else if (currentTool === 'scale') {
       const newPts = [...currentScalePts, x, y];
       if (newPts.length === 4) {
         onScaleCalibrated(newPts);
-        setCurrentScalePts([]); // Reset
+        setCurrentScalePts([]);
       } else {
         setCurrentScalePts(newPts);
+      }
+    } else if (currentTool === 'select') {
+      // Clicked empty area — deselect
+      if (e.target === stage || e.target.getParent() === stage) {
+        if (onRoomSelect) onRoomSelect(null);
       }
     }
   };
@@ -127,7 +159,6 @@ export default function CanvasManager({
   // Close Room Polygon on Double Click
   const handleStageDblClick = (e) => {
     if (currentTool === 'room' && currentRoomPts.length >= 6) {
-      // Need at least 3 points (6 coordinates) to make a polygon
       const newRoom = {
         id: crypto.randomUUID(),
         name: 'New Room',
@@ -136,22 +167,30 @@ export default function CanvasManager({
       };
       onRoomsChange([...rooms, newRoom]);
       setCurrentRoomPts([]);
+      // Auto-select the new room for editing
+      if (onRoomSelect) onRoomSelect(newRoom.id);
+    }
+  };
+
+  const handleRoomClick = (e, roomId) => {
+    e.cancelBubble = true;
+    if (currentTool === 'select' && onRoomSelect) {
+      onRoomSelect(roomId);
     }
   };
 
   const handleNodeClick = (e, node) => {
-    e.cancelBubble = true; // prevent stage click
+    e.cancelBubble = true;
     if (currentTool === 'edge') {
       if (!selectedNodeId) {
         setSelectedNodeId(node.id);
       } else {
         if (selectedNodeId !== node.id) {
-          // Create edge
           const newEdge = {
             id: crypto.randomUUID(),
             from_node: selectedNodeId,
             to_node: node.id,
-            weight: 0 // Will be calculated on save based on scale
+            weight: 0
           };
           onEdgesChange([...edges, newEdge]);
         }
@@ -161,8 +200,31 @@ export default function CanvasManager({
       if (onNodeQrClick) {
         onNodeQrClick(node.id);
       }
+    } else if (currentTool === 'select') {
+      // Right-click or shift-click to delete node
+      if (e.evt?.shiftKey && onDeleteNode) {
+        onDeleteNode(node.id);
+      }
     }
   };
+
+  const handleEdgeClick = (e, edgeId) => {
+    e.cancelBubble = true;
+    if (currentTool === 'select' && e.evt?.shiftKey && onDeleteEdge) {
+      onDeleteEdge(edgeId);
+    }
+  };
+
+  // Helper: get polygon center for label
+  function getPolygonCenter(pts) {
+    let cx = 0, cy = 0;
+    const count = pts.length / 2;
+    for (let i = 0; i < pts.length; i += 2) {
+      cx += pts[i];
+      cy += pts[i + 1];
+    }
+    return { x: cx / count, y: cy / count };
+  }
 
   return (
     <div className="w-full h-full bg-[#EFE9E1] overflow-hidden" style={{ cursor: currentTool === 'select' ? 'grab' : 'crosshair' }}>
@@ -189,37 +251,43 @@ export default function CanvasManager({
 
         {/* ROOMS LAYER */}
         <Layer>
-          {/* Render Saved Rooms */}
           {rooms.map((room) => {
             const style = THEME.rooms[room.category] || THEME.rooms.other;
+            const isSelected = room.id === selectedRoomId;
+            const center = room.shape_data?.length >= 6 ? getPolygonCenter(room.shape_data) : null;
+
             return (
-              <Group key={room.id}>
+              <Group key={room.id} onClick={(e) => handleRoomClick(e, room.id)}>
                 <Line
                   points={room.shape_data}
-                  fill={style.fill}
-                  stroke={style.stroke}
-                  strokeWidth={2 / scale}
+                  fill={room.color || style.fill}
+                  stroke={isSelected ? '#3B82F6' : style.stroke}
+                  strokeWidth={(isSelected ? 3 : 2) / scale}
                   closed
                   opacity={0.9}
+                  dash={isSelected ? [8 / scale, 4 / scale] : undefined}
+                  hitStrokeWidth={10 / scale}
                 />
-                {/* Find center to draw label roughly */}
-                {room.shape_data.length >= 6 && (
-                  <Text 
-                    x={room.shape_data[0]} 
-                    y={room.shape_data[1]} 
+                {center && (
+                  <Text
+                    x={center.x}
+                    y={center.y}
                     text={room.name}
-                    fontSize={14 / scale}
+                    fontSize={13 / scale}
                     fill="#3C4043"
                     align="center"
+                    offsetX={(room.name.length * 3.5) / scale}
+                    offsetY={7 / scale}
                     fontFamily="Inter, sans-serif"
                     fontStyle="bold"
+                    listening={false}
                   />
                 )}
               </Group>
             );
           })}
 
-          {/* Render Room Currently Being Drawn */}
+          {/* Room Currently Being Drawn */}
           {currentRoomPts.length > 0 && (
             <Line
               points={currentRoomPts}
@@ -230,11 +298,11 @@ export default function CanvasManager({
             />
           )}
 
-          {/* Render Scale Line Currently Being Drawn */}
+          {/* Scale Line Currently Being Drawn */}
           {currentScalePts.length > 0 && (
             <Line
               points={currentScalePts}
-              stroke="#EF4444" // Red for calibration
+              stroke="#EF4444"
               strokeWidth={4 / scale}
               dash={[5 / scale, 5 / scale]}
               closed={false}
@@ -244,34 +312,34 @@ export default function CanvasManager({
 
         {/* GRAPH LAYER (Paths and Nodes) */}
         <Layer>
-          {/* Edges (Google Maps style paths) */}
+          {/* Edges */}
           {edges.map((edge) => {
             const n1 = nodes.find(n => n.id === edge.from_node);
             const n2 = nodes.find(n => n.id === edge.to_node);
             if (!n1 || !n2) return null;
             return (
-              <Group key={edge.id}>
-                {/* Path Outline */}
-                <Line 
+              <Group key={edge.id} onClick={(e) => handleEdgeClick(e, edge.id)}>
+                <Line
                   points={[n1.x, n1.y, n2.x, n2.y]}
                   stroke={THEME.path.outline}
                   strokeWidth={THEME.path.outlineWidth / scale}
                   lineCap="round"
                   lineJoin="round"
+                  hitStrokeWidth={15 / scale}
                 />
-                {/* Path Inner */}
-                <Line 
+                <Line
                   points={[n1.x, n1.y, n2.x, n2.y]}
                   stroke={THEME.path.color}
                   strokeWidth={THEME.path.width / scale}
                   lineCap="round"
                   lineJoin="round"
+                  listening={false}
                 />
               </Group>
             );
           })}
 
-          {/* Render Active Edge Line */}
+          {/* Active Edge Line */}
           {currentTool === 'edge' && selectedNodeId && (
             <Line
               points={[
@@ -283,36 +351,52 @@ export default function CanvasManager({
               stroke={THEME.path.color}
               strokeWidth={THEME.path.width / scale}
               dash={[5 / scale, 5 / scale]}
+              listening={false}
             />
           )}
 
           {/* Nodes */}
           {nodes.map((node) => {
             const hasQr = qrPoints.some(q => q.node_id === node.id);
+            const ns = NODE_STYLES[node.type] || NODE_STYLES.junction;
+            const isEdgeSelected = selectedNodeId === node.id;
+
             return (
               <Group key={node.id}>
                 <Circle
                   x={node.x}
                   y={node.y}
-                  radius={(selectedNodeId === node.id ? 8 : 5) / scale}
-                  fill={selectedNodeId === node.id ? THEME.path.color : (hasQr ? "#8B5CF6" : "#FFFFFF")}
-                  stroke={hasQr ? "#6D28D9" : "#1A73E8"}
+                  radius={(isEdgeSelected ? 9 : 6) / scale}
+                  fill={isEdgeSelected ? THEME.path.color : (hasQr ? '#8B5CF6' : ns.fill)}
+                  stroke={hasQr ? '#6D28D9' : ns.stroke}
                   strokeWidth={2 / scale}
                   onClick={(e) => handleNodeClick(e, node)}
                   onTap={(e) => handleNodeClick(e, node)}
                   onMouseEnter={(e) => {
-                    if (currentTool === 'edge' || currentTool === 'qr') {
-                      const container = e.target.getStage().container();
-                      container.style.cursor = 'pointer';
+                    if (currentTool === 'edge' || currentTool === 'qr' || currentTool === 'select') {
+                      e.target.getStage().container().style.cursor = 'pointer';
                     }
                   }}
                   onMouseLeave={(e) => {
                     if (currentTool === 'edge' || currentTool === 'qr') {
-                      const container = e.target.getStage().container();
-                      container.style.cursor = 'crosshair';
+                      e.target.getStage().container().style.cursor = 'crosshair';
+                    } else if (currentTool === 'select') {
+                      e.target.getStage().container().style.cursor = 'grab';
                     }
                   }}
                 />
+                {/* Node type label */}
+                {node.type !== 'junction' && (
+                  <Text
+                    x={node.x - (5 / scale)}
+                    y={node.y - (4 / scale)}
+                    text={ns.label}
+                    fontSize={8 / scale}
+                    fill={ns.stroke}
+                    fontStyle="bold"
+                    listening={false}
+                  />
+                )}
                 {hasQr && (
                   <Text
                     x={node.x - (8 / scale)}
@@ -329,6 +413,25 @@ export default function CanvasManager({
           })}
         </Layer>
       </Stage>
+
+      {/* Shift+Click hint */}
+      {currentTool === 'select' && (
+        <div style={{
+          position: 'absolute',
+          bottom: '16px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: 'rgba(0,0,0,0.7)',
+          color: '#9ca3af',
+          padding: '6px 16px',
+          borderRadius: '8px',
+          fontSize: '0.75rem',
+          pointerEvents: 'none',
+          zIndex: 10,
+        }}>
+          Click room to edit · Shift+Click node/edge to delete
+        </div>
+      )}
     </div>
   );
 }
