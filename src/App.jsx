@@ -60,6 +60,7 @@ export default function App() {
 
           {/* Public visitor app (no login, loaded by org slug) */}
           <Route path="/:orgSlug" element={<OrgVisitorPage />} />
+          <Route path="/v/:orgSlug" element={<OrgVisitorPage />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>
