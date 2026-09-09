@@ -106,32 +106,41 @@ export default function SuperAdminDashboard() {
     setInviteLoading(true);
 
     try {
-      // 1. Sign up the user in Supabase Auth
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: inviteEmail.trim(),
-        password: invitePassword,
+      // Use database RPC to create admin immediately and avoid email rate limits
+      const { error: rpcError } = await supabase.rpc('create_org_admin_user', {
+        p_email: inviteEmail.trim(),
+        p_password: invitePassword,
+        p_org_id: invitingOrgId,
       });
 
-      if (authError) throw authError;
+      if (rpcError) {
+        // Fallback to client signup if RPC fails
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email: inviteEmail.trim(),
+          password: invitePassword,
+        });
 
-      if (!authData?.user) {
-        throw new Error('User creation failed or requires email confirmation.');
+        if (authError) throw authError;
+
+        if (!authData?.user) {
+          throw new Error('User creation failed or requires email confirmation.');
+        }
+
+        const { error: adminError } = await supabase.from('admins').insert({
+          org_id: invitingOrgId,
+          email: inviteEmail.trim(),
+          role: 'org_admin',
+          auth_id: authData.user.id,
+        });
+
+        if (adminError) throw adminError;
       }
-
-      // 2. Add entry to admins table
-      const { error: adminError } = await supabase.from('admins').insert({
-        org_id: invitingOrgId,
-        email: inviteEmail.trim(),
-        role: 'org_admin',
-        auth_id: authData.user.id,
-      });
-
-      if (adminError) throw adminError;
 
       alert(`Org Admin created successfully for ${inviteEmail}!`);
       setInvitingOrgId(null);
       setInviteEmail('');
       setInvitePassword('');
+      loadData();
     } catch (err) {
       setInviteError(err.message);
     } finally {
