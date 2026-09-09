@@ -1,3 +1,4 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text } from 'react-konva';
 
 // Node type visual config
