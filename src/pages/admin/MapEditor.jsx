@@ -218,11 +218,6 @@ export default function MapEditor() {
     pushState((prev) => ({ ...prev, edges: updatedEdges }), 'Update edges');
   }, [pushState]);
 
-  // Commit history snapshot explicitly
-  const handleCommitHistory = useCallback((partialState) => {
-    pushState((prev) => ({ ...prev, ...partialState }), 'Commit history snapshot');
-  }, [pushState]);
-
   // Delete Handlers
   const handleDeleteRoom = useCallback((roomId) => {
     pushState((prev) => ({
@@ -265,14 +260,44 @@ export default function MapEditor() {
   // Delete Currently Selected Item(s)
   const handleDeleteSelected = useCallback(() => {
     if (!selection.id) return;
+
+    const idsToDelete = selection.ids && selection.ids.size > 0
+      ? Array.from(selection.ids)
+      : [selection.id];
+
     if (selection.type === 'room') {
-      selection.ids.forEach((id) => handleDeleteRoom(id));
+      pushState((prev) => ({
+        ...prev,
+        rooms: prev.rooms.filter((r) => !idsToDelete.includes(r.id)),
+        deletedRoomIds: [...prev.deletedRoomIds, ...idsToDelete],
+      }), 'Delete room(s)');
+      setSelection({ type: null, id: null, ids: new Set() });
     } else if (selection.type === 'node') {
-      selection.ids.forEach((id) => handleDeleteNode(id));
+      pushState((prev) => {
+        const connectedEdges = prev.edges.filter(
+          (e) => idsToDelete.includes(e.from_node) || idsToDelete.includes(e.to_node)
+        );
+        const connectedEdgeIds = connectedEdges.map((e) => e.id);
+
+        return {
+          ...prev,
+          nodes: prev.nodes.filter((n) => !idsToDelete.includes(n.id)),
+          edges: prev.edges.filter((e) => !idsToDelete.includes(e.from_node) && !idsToDelete.includes(e.to_node)),
+          qrPoints: prev.qrPoints.filter((q) => !idsToDelete.includes(q.node_id)),
+          deletedNodeIds: [...prev.deletedNodeIds, ...idsToDelete],
+          deletedEdgeIds: [...prev.deletedEdgeIds, ...connectedEdgeIds],
+        };
+      }, 'Delete node(s)');
+      setSelection({ type: null, id: null, ids: new Set() });
     } else if (selection.type === 'edge') {
-      selection.ids.forEach((id) => handleDeleteEdge(id));
+      pushState((prev) => ({
+        ...prev,
+        edges: prev.edges.filter((e) => !idsToDelete.includes(e.id)),
+        deletedEdgeIds: [...prev.deletedEdgeIds, ...idsToDelete],
+      }), 'Delete edge(s)');
+      setSelection({ type: null, id: null, ids: new Set() });
     }
-  }, [selection, handleDeleteRoom, handleDeleteNode, handleDeleteEdge]);
+  }, [selection, pushState]);
 
   // Global Keyboard Shortcuts (Undo, Redo, Delete, Tools)
   useEffect(() => {
@@ -609,6 +634,7 @@ export default function MapEditor() {
       {/* Interactive Konva Canvas */}
       <CanvasManager
         currentTool={currentTool}
+        onSwitchTool={setCurrentTool}
         nodeType={nodeType}
         blueprintUrl={blueprintUrl}
         rooms={rooms}
@@ -623,7 +649,6 @@ export default function MapEditor() {
         onScaleCalibrated={handleScaleCalibrated}
         onNodeQrClick={handleToggleQr}
         onDeleteSelected={handleDeleteSelected}
-        onCommitHistory={handleCommitHistory}
         gridVisible={gridVisible}
         gridSize={gridSize}
         snapEnabled={snapEnabled}

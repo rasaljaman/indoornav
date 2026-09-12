@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Shape } from 'react-konva';
-import { Maximize2, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { Maximize2, ZoomIn, ZoomOut, RotateCcw, Check, Undo2, X, Trash2 } from 'lucide-react';
 
 // Node type visual config
 const NODE_STYLES = {
@@ -15,7 +15,7 @@ const NODE_STYLES = {
 const THEME = {
   background: '#EFE9E1',
   grid: 'rgba(0, 0, 0, 0.08)',
-  guideLine: '#06B6D4', // Cyan alignment line
+  guideLine: '#06B6D4',
   rooms: {
     washroom: { fill: '#BDE3F4', stroke: '#90C7DF' },
     entrance: { fill: '#F9E5A3', stroke: '#E3C966' },
@@ -31,12 +31,13 @@ const THEME = {
     width: 6,
     outline: '#FFFFFF',
     outlineWidth: 10,
-    selectedOutline: '#3B82F6',
+    selectedOutline: '#2563EB',
   }
 };
 
 export default function CanvasManager({
   currentTool,
+  onSwitchTool,
   nodeType = 'junction',
   blueprintUrl,
   rooms = [],
@@ -44,14 +45,13 @@ export default function CanvasManager({
   edges = [],
   qrPoints = [],
   selection = { type: null, id: null, ids: new Set() },
-  onSelect, // ({ type, id, isMulti }) => void
+  onSelect,
   onRoomsChange,
   onNodesChange,
   onEdgesChange,
   onScaleCalibrated,
   onNodeQrClick,
   onDeleteSelected,
-  onCommitHistory, // push snapshot to history
   gridVisible = true,
   gridSize = 20,
   snapEnabled = true,
@@ -59,13 +59,12 @@ export default function CanvasManager({
   const stageRef = useRef(null);
   const containerRef = useRef(null);
 
-  // Window / Container Dimensions
+  // Container Dimensions
   const [dimensions, setDimensions] = useState({
     width: window.innerWidth,
     height: window.innerHeight,
   });
 
-  // Dynamic resize
   useEffect(() => {
     function handleResize() {
       if (containerRef.current) {
@@ -95,7 +94,7 @@ export default function CanvasManager({
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isMiddleMouseDown, setIsMiddleMouseDown] = useState(false);
 
-  // Touch tracking for pinch-to-zoom & two-finger drag
+  // Touch tracking
   const lastCenter = useRef(null);
   const lastDist = useRef(0);
 
@@ -105,7 +104,7 @@ export default function CanvasManager({
   const [edgeStartNodeId, setEdgeStartNodeId] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
-  // Smart Alignment Guides State: [{ orientation: 'v'|'h', pos: number }]
+  // Smart Alignment Guides State
   const [activeGuides, setActiveGuides] = useState([]);
 
   // Load Blueprint Image
@@ -149,19 +148,17 @@ export default function CanvasManager({
     return Math.round(val / gridSize) * gridSize;
   }, [snapEnabled, gridSize]);
 
-  // Compute Alignment Guides
+  // Compute Alignment Candidates
   const getAlignmentCandidates = useCallback((excludeId, excludeType) => {
     const xTargets = [];
     const yTargets = [];
 
-    // Collect from other nodes
     nodes.forEach((n) => {
       if (excludeType === 'node' && n.id === excludeId) return;
       xTargets.push({ pos: n.x, label: 'Node' });
       yTargets.push({ pos: n.y, label: 'Node' });
     });
 
-    // Collect from rooms
     rooms.forEach((r) => {
       if (excludeType === 'room' && r.id === excludeId) return;
       if (!r.shape_data || r.shape_data.length < 4) return;
@@ -216,7 +213,7 @@ export default function CanvasManager({
     setPosition(newPos);
   }, [dimensions]);
 
-  // Mouse wheel zoom
+  // Wheel zoom
   const handleWheel = useCallback((e) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
@@ -228,7 +225,7 @@ export default function CanvasManager({
     zoomAtPointer(newScale, stage.getPointerPosition());
   }, [zoomAtPointer]);
 
-  // Touch handlers for multi-touch pinch zoom & pan
+  // Touch handlers
   const handleTouchMove = (e) => {
     const touch1 = e.evt.touches[0];
     const touch2 = e.evt.touches[1];
@@ -279,7 +276,6 @@ export default function CanvasManager({
 
   // Fit to screen / Reset View
   const handleFitToScreen = useCallback(() => {
-    // Collect bounds of all elements
     const allX = [];
     const allY = [];
 
@@ -333,7 +329,6 @@ export default function CanvasManager({
   // Stage mouse events
   const handleMouseDown = (e) => {
     if (e.evt.button === 1) {
-      // Middle mouse button pressed
       setIsMiddleMouseDown(true);
     }
   };
@@ -363,11 +358,87 @@ export default function CanvasManager({
     }
   };
 
+  // ==========================================
+  // ROOM COMPLETION & IN-PROGRESS EDITING
+  // ==========================================
+
+  // Finish and commit the in-progress room polygon
+  const finishRoomDrawing = useCallback(() => {
+    if (currentRoomPts.length < 6) {
+      setCurrentRoomPts([]);
+      return;
+    }
+
+    // Clean duplicate consecutive points
+    const cleanedPts = [];
+    for (let i = 0; i < currentRoomPts.length; i += 2) {
+      const px = currentRoomPts[i];
+      const py = currentRoomPts[i + 1];
+      const lastX = cleanedPts[cleanedPts.length - 2];
+      const lastY = cleanedPts[cleanedPts.length - 1];
+      if (lastX === undefined || Math.hypot(px - lastX, py - lastY) > 3) {
+        cleanedPts.push(px, py);
+      }
+    }
+
+    if (cleanedPts.length < 6) {
+      setCurrentRoomPts([]);
+      return;
+    }
+
+    const newRoom = {
+      id: crypto.randomUUID(),
+      name: 'New Room',
+      category: 'other',
+      shape_data: cleanedPts,
+      color: null,
+    };
+
+    const updatedRooms = [...rooms, newRoom];
+    // Push once into history
+    onRoomsChange(updatedRooms);
+    setCurrentRoomPts([]);
+
+    // Select the new room and auto-switch to select tool
+    onSelect({ type: 'room', id: newRoom.id });
+    if (onSwitchTool) {
+      onSwitchTool('select');
+    }
+  }, [currentRoomPts, rooms, onRoomsChange, onSelect, onSwitchTool]);
+
+  // Undo the last drawn vertex point
+  const undoLastRoomPoint = useCallback(() => {
+    setCurrentRoomPts((prev) => (prev.length > 2 ? prev.slice(0, -2) : []));
+  }, []);
+
+  // Cancel in-progress room drawing
+  const cancelRoomDrawing = useCallback(() => {
+    setCurrentRoomPts([]);
+  }, []);
+
+  // Keyboard handler for in-progress drawing (Esc to cancel, Backspace to undo point)
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (currentRoomPts.length > 0) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          cancelRoomDrawing();
+        } else if (e.key === 'Backspace' && e.target.tagName !== 'INPUT') {
+          e.preventDefault();
+          undoLastRoomPoint();
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          finishRoomDrawing();
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentRoomPts, cancelRoomDrawing, undoLastRoomPoint, finishRoomDrawing]);
+
   // Canvas Click (handling tools)
   const handleStageClick = (e) => {
-    // Ignore middle-click or right-click
     if (e.evt.button === 1 || e.evt.button === 2) return;
-    // Don't draw if space is pressed for panning
     if (isSpacePressed || isMiddleMouseDown) return;
 
     const stage = e.target.getStage();
@@ -381,6 +452,16 @@ export default function CanvasManager({
     const y = snapCoord(rawY);
 
     if (currentTool === 'room') {
+      // Check if clicked near the start point to close room
+      if (currentRoomPts.length >= 6) {
+        const startX = currentRoomPts[0];
+        const startY = currentRoomPts[1];
+        const distToStart = Math.hypot(x - startX, y - startY);
+        if (distToStart <= 22 / scale) {
+          finishRoomDrawing();
+          return;
+        }
+      }
       setCurrentRoomPts([...currentRoomPts, x, y]);
     } else if (currentTool === 'node') {
       const newNode = {
@@ -391,7 +472,6 @@ export default function CanvasManager({
       };
       const updatedNodes = [...nodes, newNode];
       onNodesChange(updatedNodes);
-      onCommitHistory({ nodes: updatedNodes });
     } else if (currentTool === 'scale') {
       const newPts = [...currentScalePts, x, y];
       if (newPts.length === 4) {
@@ -401,7 +481,6 @@ export default function CanvasManager({
         setCurrentScalePts(newPts);
       }
     } else if (currentTool === 'select') {
-      // Clicked empty stage -> deselect everything
       if (e.target === stage || e.target.getParent() === stage) {
         onSelect({ type: null, id: null });
       }
@@ -409,33 +488,25 @@ export default function CanvasManager({
   };
 
   // Double click closes Room Polygon
-  const handleStageDblClick = () => {
+  const handleStageDblClick = (e) => {
     if (currentTool === 'room' && currentRoomPts.length >= 6) {
-      const newRoom = {
-        id: crypto.randomUUID(),
-        name: 'New Room',
-        category: 'other',
-        shape_data: currentRoomPts,
-        color: null,
-      };
-      const updatedRooms = [...rooms, newRoom];
-      onRoomsChange(updatedRooms);
-      onCommitHistory({ rooms: updatedRooms });
-      setCurrentRoomPts([]);
-      // Select the newly drawn room
-      onSelect({ type: 'room', id: newRoom.id });
+      finishRoomDrawing();
     }
   };
 
   // Select handlers
   const handleRoomClick = (e, roomId) => {
     e.cancelBubble = true;
-    if (currentTool === 'select') {
+    // Allow selecting existing room in select tool OR in room tool if not actively placing points
+    if (currentTool === 'select' || (currentTool === 'room' && currentRoomPts.length === 0)) {
       onSelect({
         type: 'room',
         id: roomId,
         isMulti: e.evt?.shiftKey || false,
       });
+      if (currentTool === 'room' && onSwitchTool) {
+        onSwitchTool('select');
+      }
     }
   };
 
@@ -446,7 +517,6 @@ export default function CanvasManager({
         setEdgeStartNodeId(node.id);
       } else {
         if (edgeStartNodeId !== node.id) {
-          // Check if edge already exists
           const exists = edges.some(
             (edge) =>
               (edge.from_node === edgeStartNodeId && edge.to_node === node.id) ||
@@ -461,25 +531,27 @@ export default function CanvasManager({
             };
             const updatedEdges = [...edges, newEdge];
             onEdgesChange(updatedEdges);
-            onCommitHistory({ edges: updatedEdges });
           }
         }
         setEdgeStartNodeId(null);
       }
     } else if (currentTool === 'qr') {
       onNodeQrClick(node.id);
-    } else if (currentTool === 'select') {
+    } else if (currentTool === 'select' || (currentTool === 'node')) {
       onSelect({
         type: 'node',
         id: node.id,
         isMulti: e.evt?.shiftKey || false,
       });
+      if (currentTool === 'node' && onSwitchTool) {
+        onSwitchTool('select');
+      }
     }
   };
 
   const handleEdgeClick = (e, edgeId) => {
     e.cancelBubble = true;
-    if (currentTool === 'select') {
+    if (currentTool === 'select' || currentTool === 'edge') {
       onSelect({
         type: 'edge',
         id: edgeId,
@@ -494,17 +566,9 @@ export default function CanvasManager({
 
   // Drag Node
   const handleNodeDragMove = (e, nodeId) => {
-    const stage = stageRef.current;
-    if (!stage) return;
+    let targetX = snapCoord(e.target.x());
+    let targetY = snapCoord(e.target.y());
 
-    let targetX = e.target.x();
-    let targetY = e.target.y();
-
-    // 1. Grid snapping
-    targetX = snapCoord(targetX);
-    targetY = snapCoord(targetY);
-
-    // 2. Smart Alignment Snapping
     const guides = [];
     const threshold = 6 / scale;
     const { xTargets, yTargets } = getAlignmentCandidates(nodeId, 'node');
@@ -529,7 +593,7 @@ export default function CanvasManager({
     e.target.y(targetY);
     setActiveGuides(guides);
 
-    // Live update nodes in state so connected edges re-render in real time!
+    // Dynamic live updating of node coordinates
     const updated = nodes.map((n) => (n.id === nodeId ? { ...n, x: targetX, y: targetY } : n));
     onNodesChange(updated);
   };
@@ -540,33 +604,25 @@ export default function CanvasManager({
     const targetY = e.target.y();
     const updated = nodes.map((n) => (n.id === nodeId ? { ...n, x: targetX, y: targetY } : n));
     onNodesChange(updated);
-    onCommitHistory({ nodes: updated });
   };
 
   // Drag Room
   const handleRoomDragMove = (e, roomId) => {
-    const stage = stageRef.current;
-    if (!stage) return;
-
     const room = rooms.find((r) => r.id === roomId);
     if (!room || !room.shape_data) return;
 
-    // e.target is the Group containing the room
     let groupDx = e.target.x();
     let groupDy = e.target.y();
 
-    // Calculate room center
     const center = getPolygonCenter(room.shape_data);
     let candidateCenterX = center.x + groupDx;
     let candidateCenterY = center.y + groupDy;
 
-    // Grid snap on room center
     const snappedCenterX = snapCoord(candidateCenterX);
     const snappedCenterY = snapCoord(candidateCenterY);
     groupDx += (snappedCenterX - candidateCenterX);
     groupDy += (snappedCenterY - candidateCenterY);
 
-    // Alignment guides
     const guides = [];
     const threshold = 6 / scale;
     const { xTargets, yTargets } = getAlignmentCandidates(roomId, 'room');
@@ -597,13 +653,11 @@ export default function CanvasManager({
     const groupDx = e.target.x();
     const groupDy = e.target.y();
 
-    // Reset group coordinates
     e.target.x(0);
     e.target.y(0);
 
     if (groupDx === 0 && groupDy === 0) return;
 
-    // Apply offset to all shape points
     const updatedRooms = rooms.map((r) => {
       if (r.id === roomId && r.shape_data) {
         const shiftedPts = r.shape_data.map((val, idx) => (idx % 2 === 0 ? val + groupDx : val + groupDy));
@@ -613,7 +667,6 @@ export default function CanvasManager({
     });
 
     onRoomsChange(updatedRooms);
-    onCommitHistory({ rooms: updatedRooms });
   };
 
   // Helper: polygon center
@@ -627,15 +680,14 @@ export default function CanvasManager({
     return { x: cx / count, y: cy / count };
   }
 
-  // Determine stage draggability and cursor
-  const isStageDraggable = isSpacePressed || isMiddleMouseDown || currentTool === 'select';
+  const isStageDraggable = isSpacePressed || isMiddleMouseDown || (currentTool === 'select' && currentRoomPts.length === 0);
   const getCursor = () => {
     if (isSpacePressed || isMiddleMouseDown) return 'grabbing';
     if (currentTool === 'select') return 'default';
     return 'crosshair';
   };
 
-  // Render Grid Layer efficiently using a single Konva Shape
+  // Render Grid Layer efficiently
   const renderGrid = useMemo(() => {
     if (!gridVisible) return null;
 
@@ -647,7 +699,6 @@ export default function CanvasManager({
           const stageY = position.y;
           const stageScale = scale;
 
-          // Compute visible canvas rect in world coordinates
           const viewWidth = dimensions.width / stageScale;
           const viewHeight = dimensions.height / stageScale;
           const startX = Math.floor((-stageX / stageScale) / step) * step;
@@ -656,14 +707,10 @@ export default function CanvasManager({
           const endY = startY + viewHeight + step * 2;
 
           context.beginPath();
-
-          // Draw vertical lines
           for (let gx = startX; gx <= endX; gx += step) {
             context.moveTo(gx, startY);
             context.lineTo(gx, endY);
           }
-
-          // Draw horizontal lines
           for (let gy = startY; gy <= endY; gy += step) {
             context.moveTo(startX, gy);
             context.lineTo(endX, gy);
@@ -678,6 +725,21 @@ export default function CanvasManager({
     );
   }, [gridVisible, gridSize, position, scale, dimensions]);
 
+  // Selected room object if any
+  const selectedRoom = useMemo(() => {
+    if (selection.type === 'room' && selection.id) {
+      return rooms.find((r) => r.id === selection.id);
+    }
+    return null;
+  }, [selection, rooms]);
+
+  const selectedRoomCenter = useMemo(() => {
+    if (selectedRoom?.shape_data?.length >= 6) {
+      return getPolygonCenter(selectedRoom.shape_data);
+    }
+    return null;
+  }, [selectedRoom]);
+
   return (
     <div
       ref={containerRef}
@@ -689,6 +751,71 @@ export default function CanvasManager({
       onMouseDown={handleMouseDown}
       onMouseUp={handleMouseUp}
     >
+      {/* IN-PROGRESS ROOM DRAWING BANNER */}
+      {currentRoomPts.length > 0 && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-[#0e0e18]/95 border border-blue-500/30 backdrop-blur-xl px-5 py-2.5 rounded-2xl shadow-2xl z-30 flex items-center gap-4 animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
+            <span className="text-sm font-semibold text-white">
+              Drawing Room: {currentRoomPts.length / 2} points placed
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {currentRoomPts.length >= 6 && (
+              <button
+                onClick={finishRoomDrawing}
+                className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
+              >
+                <Check size={14} /> Finish Room
+              </button>
+            )}
+
+            <button
+              onClick={undoLastRoomPoint}
+              className="bg-white/10 hover:bg-white/20 text-gray-200 text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 transition-all cursor-pointer"
+              title="Undo last point (Backspace)"
+            >
+              <Undo2 size={13} /> Undo Point
+            </button>
+
+            <button
+              onClick={cancelRoomDrawing}
+              className="bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 transition-all cursor-pointer border border-red-500/20"
+              title="Cancel drawing (Esc)"
+            >
+              <X size={13} /> Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* QUICK DELETE BADGE FOR SELECTED ROOM */}
+      {selectedRoom && selectedRoomCenter && currentRoomPts.length === 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${position.x + selectedRoomCenter.x * scale}px`,
+            top: `${position.y + selectedRoomCenter.y * scale - 42}px`,
+            transform: 'translate(-50%, -100%)',
+            zIndex: 25,
+            pointerEvents: 'auto',
+          }}
+          className="animate-fadeIn"
+        >
+          <div className="flex items-center gap-1.5 bg-[#0f0f18]/95 border border-red-500/30 backdrop-blur-xl px-2.5 py-1 rounded-xl shadow-xl">
+            <span className="text-xs text-gray-200 font-medium">{selectedRoom.name}</span>
+            <button
+              onClick={() => onDeleteSelected()}
+              className="p-1 text-red-400 hover:text-red-200 hover:bg-red-500/20 rounded-lg transition-all cursor-pointer"
+              title="Delete Room (Del)"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       <Stage
         ref={stageRef}
         width={dimensions.width}
@@ -740,10 +867,10 @@ export default function CanvasManager({
                   closed
                   opacity={0.92}
                   dash={isSelected ? [8 / scale, 4 / scale] : undefined}
-                  hitStrokeWidth={12 / scale}
+                  hitStrokeWidth={14 / scale}
                   shadowColor={isSelected ? '#3B82F6' : undefined}
-                  shadowBlur={isSelected ? 10 : 0}
-                  shadowOpacity={0.6}
+                  shadowBlur={isSelected ? 12 : 0}
+                  shadowOpacity={0.7}
                 />
                 {center && (
                   <Text
@@ -766,16 +893,54 @@ export default function CanvasManager({
 
           {/* Active Room Drawing Line */}
           {currentRoomPts.length > 0 && (
-            <Line
-              points={currentRoomPts}
-              stroke="#2563EB"
-              strokeWidth={3 / scale}
-              dash={[8 / scale, 4 / scale]}
-              closed={false}
-            />
+            <Group>
+              <Line
+                points={currentRoomPts}
+                stroke="#2563EB"
+                strokeWidth={3 / scale}
+                dash={[8 / scale, 4 / scale]}
+                closed={false}
+              />
+              {/* Dynamic rubberband line to cursor */}
+              <Line
+                points={[
+                  currentRoomPts[currentRoomPts.length - 2],
+                  currentRoomPts[currentRoomPts.length - 1],
+                  mousePos.x,
+                  mousePos.y,
+                ]}
+                stroke="#3B82F6"
+                strokeWidth={2 / scale}
+                dash={[4 / scale, 4 / scale]}
+                opacity={0.8}
+                listening={false}
+              />
+              {/* Pulsating Start Point Circle (Click to close) */}
+              <Circle
+                x={currentRoomPts[0]}
+                y={currentRoomPts[1]}
+                radius={8 / scale}
+                fill="#2563EB"
+                stroke="#FFFFFF"
+                strokeWidth={2 / scale}
+                listening={false}
+              />
+              {currentRoomPts.length >= 6 && (
+                <Text
+                  x={currentRoomPts[0] + 12 / scale}
+                  y={currentRoomPts[1] - 8 / scale}
+                  text="Click to close"
+                  fontSize={11 / scale}
+                  fill="#1D4ED8"
+                  fontStyle="bold"
+                  fontFamily="Inter, sans-serif"
+                  listening={false}
+                />
+              )}
+            </Group>
           )}
 
-          {/* Active Scale Calibration Line */}
+          {/* Active Scale Line */}
           {currentScalePts.length > 0 && (
             <Line
               points={currentScalePts}
@@ -800,7 +965,6 @@ export default function CanvasManager({
 
             return (
               <Group key={edge.id} onClick={(e) => handleEdgeClick(e, edge.id)}>
-                {/* Edge Outline */}
                 <Line
                   points={[n1.x, n1.y, n2.x, n2.y]}
                   stroke={isSelected ? THEME.path.selectedOutline : THEME.path.outline}
@@ -809,7 +973,6 @@ export default function CanvasManager({
                   lineJoin="round"
                   hitStrokeWidth={16 / scale}
                 />
-                {/* Edge Core */}
                 <Line
                   points={[n1.x, n1.y, n2.x, n2.y]}
                   stroke={isSelected ? '#2563EB' : THEME.path.color}
@@ -857,7 +1020,6 @@ export default function CanvasManager({
                 onDragMove={(e) => handleNodeDragMove(e, node.id)}
                 onDragEnd={(e) => handleNodeDragEnd(e, node.id)}
               >
-                {/* Node halo if selected or active edge */}
                 {(isSelected || isConnectingEdge) && (
                   <Circle
                     radius={14 / scale}
@@ -868,7 +1030,6 @@ export default function CanvasManager({
                   />
                 )}
 
-                {/* Main Node Circle */}
                 <Circle
                   radius={(isConnectingEdge || isSelected ? 8.5 : 6.5) / scale}
                   fill={isConnectingEdge ? THEME.path.color : hasQr ? '#8B5CF6' : ns.fill}
@@ -878,7 +1039,6 @@ export default function CanvasManager({
                   shadowBlur={isSelected ? 8 : 0}
                 />
 
-                {/* Node type letter label */}
                 {node.type !== 'junction' && (
                   <Text
                     x={-4.5 / scale}
@@ -891,7 +1051,6 @@ export default function CanvasManager({
                   />
                 )}
 
-                {/* QR Indicator Badge */}
                 {hasQr && (
                   <Text
                     x={-7 / scale}
@@ -917,7 +1076,6 @@ export default function CanvasManager({
             const viewH = dimensions.height / scale;
 
             if (guide.orientation === 'v') {
-              // Vertical Guide Line
               return (
                 <Line
                   key={`guide-v-${idx}`}
@@ -933,7 +1091,6 @@ export default function CanvasManager({
                 />
               );
             } else {
-              // Horizontal Guide Line
               return (
                 <Line
                   key={`guide-h-${idx}`}
@@ -955,7 +1112,6 @@ export default function CanvasManager({
 
       {/* Floating Bottom Viewport Controls */}
       <div className="absolute bottom-5 right-5 flex items-center gap-1.5 bg-[#0d0d14]/90 backdrop-blur-xl border border-white/10 rounded-2xl p-1.5 shadow-2xl z-20 select-none">
-        {/* Zoom Out */}
         <button
           onClick={() => zoomAtPointer(scale / 1.2)}
           className="p-2 text-gray-300 hover:text-white hover:bg-white/10 rounded-xl transition-all cursor-pointer"
@@ -964,12 +1120,10 @@ export default function CanvasManager({
           <ZoomOut size={16} />
         </button>
 
-        {/* Zoom Percentage */}
         <span className="text-xs font-semibold px-2 text-gray-300 min-w-[52px] text-center font-mono">
           {Math.round(scale * 100)}%
         </span>
 
-        {/* Zoom In */}
         <button
           onClick={() => zoomAtPointer(scale * 1.2)}
           className="p-2 text-gray-300 hover:text-white hover:bg-white/10 rounded-xl transition-all cursor-pointer"
@@ -980,7 +1134,6 @@ export default function CanvasManager({
 
         <div className="w-px h-5 bg-white/10 mx-0.5" />
 
-        {/* Reset / 100% */}
         <button
           onClick={() => {
             setScale(1);
@@ -992,7 +1145,6 @@ export default function CanvasManager({
           <RotateCcw size={15} />
         </button>
 
-        {/* Fit to Screen */}
         <button
           onClick={handleFitToScreen}
           className="p-2 text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded-xl transition-all cursor-pointer flex items-center gap-1 text-xs font-medium"
@@ -1010,15 +1162,11 @@ export default function CanvasManager({
         </span>
         <span>•</span>
         <span>
-          <strong className="text-white">Scroll</strong> to Zoom
+          <strong className="text-white">Click room</strong> to Select
         </span>
         <span>•</span>
         <span>
-          <strong className="text-white">Click</strong> to Inspect / Move
-        </span>
-        <span>•</span>
-        <span>
-          <strong className="text-white">Del</strong> to Remove
+          <strong className="text-white">Delete / Backspace</strong> to Remove
         </span>
       </div>
     </div>
