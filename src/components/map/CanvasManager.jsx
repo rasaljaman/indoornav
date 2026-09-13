@@ -900,6 +900,13 @@ export default function CanvasManager({
     const snap = snapPointToElements(rawX, rawY, wallId);
     e.target.x(snap.x);
     e.target.y(snap.y);
+  };
+
+  const handleWallEndpointDragEnd = (e, wallId, endpoint) => {
+    e.cancelBubble = true;
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY, wallId);
 
     const updated = walls.map((w) => {
       if (w.id === wallId) {
@@ -1470,6 +1477,7 @@ export default function CanvasManager({
                         strokeWidth={2 / scale}
                         draggable
                         onDragMove={(e) => handleWallEndpointDrag(e, wall.id, 1)}
+                        onDragEnd={(e) => handleWallEndpointDragEnd(e, wall.id, 1)}
                       />
                       <Circle
                         x={wall.x2}
@@ -1480,6 +1488,7 @@ export default function CanvasManager({
                         strokeWidth={2 / scale}
                         draggable
                         onDragMove={(e) => handleWallEndpointDrag(e, wall.id, 2)}
+                        onDragEnd={(e) => handleWallEndpointDragEnd(e, wall.id, 2)}
                       />
                     </>
                   )}
