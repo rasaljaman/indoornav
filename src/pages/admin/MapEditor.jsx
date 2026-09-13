@@ -179,27 +179,34 @@ export default function MapEditor() {
   // Selection Handler
   const handleSelect = useCallback(({ type, id, isMulti = false }) => {
     if (!id || !type) {
-      setSelection({ type: null, id: null, ids: new Set() });
+      setSelection({ type: null, id: null, ids: new Set(), items: [] });
       return;
     }
 
     setSelection((prev) => {
       if (isMulti) {
-        const newIds = new Set(prev.ids);
+        const newIds = new Set(prev.ids || []);
+        let newItems = [...(prev.items || [])];
+
         if (newIds.has(id)) {
           newIds.delete(id);
-          const remainingIds = Array.from(newIds);
-          return {
-            type: remainingIds.length > 0 ? prev.type : null,
-            id: remainingIds.length > 0 ? remainingIds[remainingIds.length - 1] : null,
-            ids: newIds,
-          };
+          newItems = newItems.filter((it) => it.id !== id);
         } else {
           newIds.add(id);
-          return { type, id, ids: newIds };
+          newItems.push({ id, type });
         }
+
+        const remainingIds = Array.from(newIds);
+        const lastItem = newItems[newItems.length - 1];
+
+        return {
+          type: newItems.length > 1 ? 'multi' : lastItem ? lastItem.type : null,
+          id: lastItem ? lastItem.id : null,
+          ids: newIds,
+          items: newItems,
+        };
       }
-      return { type, id, ids: new Set([id]) };
+      return { type, id, ids: new Set([id]), items: [{ id, type }] };
     });
   }, []);
 
@@ -259,44 +266,47 @@ export default function MapEditor() {
 
   // Delete Currently Selected Item(s)
   const handleDeleteSelected = useCallback(() => {
-    if (!selection.id) return;
+    if (!selection.id && (!selection.ids || selection.ids.size === 0)) return;
 
     const idsToDelete = selection.ids && selection.ids.size > 0
       ? Array.from(selection.ids)
       : [selection.id];
 
-    if (selection.type === 'room') {
-      pushState((prev) => ({
-        ...prev,
-        rooms: prev.rooms.filter((r) => !idsToDelete.includes(r.id)),
-        deletedRoomIds: [...prev.deletedRoomIds, ...idsToDelete],
-      }), 'Delete room(s)');
-      setSelection({ type: null, id: null, ids: new Set() });
-    } else if (selection.type === 'node') {
-      pushState((prev) => {
-        const connectedEdges = prev.edges.filter(
-          (e) => idsToDelete.includes(e.from_node) || idsToDelete.includes(e.to_node)
-        );
-        const connectedEdgeIds = connectedEdges.map((e) => e.id);
+    pushState((prev) => {
+      const remainingRooms = prev.rooms.filter((r) => !idsToDelete.includes(r.id));
+      const newDeletedRoomIds = prev.rooms
+        .filter((r) => idsToDelete.includes(r.id))
+        .map((r) => r.id);
 
-        return {
-          ...prev,
-          nodes: prev.nodes.filter((n) => !idsToDelete.includes(n.id)),
-          edges: prev.edges.filter((e) => !idsToDelete.includes(e.from_node) && !idsToDelete.includes(e.to_node)),
-          qrPoints: prev.qrPoints.filter((q) => !idsToDelete.includes(q.node_id)),
-          deletedNodeIds: [...prev.deletedNodeIds, ...idsToDelete],
-          deletedEdgeIds: [...prev.deletedEdgeIds, ...connectedEdgeIds],
-        };
-      }, 'Delete node(s)');
-      setSelection({ type: null, id: null, ids: new Set() });
-    } else if (selection.type === 'edge') {
-      pushState((prev) => ({
+      const remainingNodes = prev.nodes.filter((n) => !idsToDelete.includes(n.id));
+      const newDeletedNodeIds = prev.nodes
+        .filter((n) => idsToDelete.includes(n.id))
+        .map((n) => n.id);
+
+      const connectedEdges = prev.edges.filter(
+        (e) =>
+          idsToDelete.includes(e.id) ||
+          newDeletedNodeIds.includes(e.from_node) ||
+          newDeletedNodeIds.includes(e.to_node)
+      );
+      const connectedEdgeIds = connectedEdges.map((e) => e.id);
+      const remainingEdges = prev.edges.filter((e) => !connectedEdgeIds.includes(e.id));
+
+      const remainingQr = prev.qrPoints.filter((q) => !newDeletedNodeIds.includes(q.node_id));
+
+      return {
         ...prev,
-        edges: prev.edges.filter((e) => !idsToDelete.includes(e.id)),
-        deletedEdgeIds: [...prev.deletedEdgeIds, ...idsToDelete],
-      }), 'Delete edge(s)');
-      setSelection({ type: null, id: null, ids: new Set() });
-    }
+        rooms: remainingRooms,
+        nodes: remainingNodes,
+        edges: remainingEdges,
+        qrPoints: remainingQr,
+        deletedRoomIds: [...(prev.deletedRoomIds || []), ...newDeletedRoomIds],
+        deletedNodeIds: [...(prev.deletedNodeIds || []), ...newDeletedNodeIds],
+        deletedEdgeIds: [...(prev.deletedEdgeIds || []), ...connectedEdgeIds],
+      };
+    }, 'Delete selected item(s)');
+
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
   }, [selection, pushState]);
 
   // Global Keyboard Shortcuts (Undo, Redo, Delete, Tools)
@@ -530,7 +540,7 @@ export default function MapEditor() {
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0a0a0f] text-white">
       {/* Top Navbar overlay */}
-      <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-black/85 via-black/50 to-transparent flex items-center px-6 z-20 pointer-events-none">
+      <div className="absolute top-0 left-0 right-0 w-full h-16 bg-gradient-to-b from-black/85 via-black/50 to-transparent flex items-center justify-between px-6 z-20 pointer-events-none">
         <button
           onClick={() => navigate('/admin')}
           className="pointer-events-auto flex items-center gap-2 text-gray-300 hover:text-white transition-colors bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/10 text-sm font-medium"
@@ -539,7 +549,7 @@ export default function MapEditor() {
           Dashboard
         </button>
 
-        <div className="ml-auto pointer-events-auto flex items-center gap-3">
+        <div className="pointer-events-auto flex items-center gap-3">
           {/* Floor Selector */}
           {allFloors.length > 1 && (
             <div className="relative">
@@ -577,7 +587,7 @@ export default function MapEditor() {
 
           {floorData?.real_width_m ? (
             <span className="text-xs bg-green-500/20 text-green-400 border border-green-500/30 px-2.5 py-1 rounded-full font-medium">
-              Scale: {floorData.real_width_m.toFixed(1)}m
+              Scale: {floorData.real_width_m.toFixed(1)}m ({((floorData.map_width || 1920) / floorData.real_width_m).toFixed(1)} px/m)
             </span>
           ) : (
             <button
@@ -677,8 +687,9 @@ export default function MapEditor() {
         }}
         onDeleteNode={handleDeleteNode}
         onDeleteEdge={handleDeleteEdge}
+        onDeleteSelected={handleDeleteSelected}
         onToggleQr={handleToggleQr}
-        onClose={() => setSelection({ type: null, id: null, ids: new Set() })}
+        onClose={() => setSelection({ type: null, id: null, ids: new Set(), items: [] })}
       />
 
       {/* Scale Calibration Dialog */}

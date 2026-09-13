@@ -1,9 +1,15 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../hooks/useAuth';
 
 export default function Navbar() {
   const { isAuthenticated, isSuperAdmin, isOrgAdmin, signOut, loading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Do not render top global navbar on full-screen editor or print layouts
+  if (location.pathname.includes('/editor') || location.pathname.includes('/print-qrs')) {
+    return null;
+  }
 
   async function handleSignOut() {
     try {

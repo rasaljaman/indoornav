@@ -502,7 +502,7 @@ export default function CanvasManager({
       onSelect({
         type: 'room',
         id: roomId,
-        isMulti: e.evt?.shiftKey || false,
+        isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
       });
       if (currentTool === 'room' && onSwitchTool) {
         onSwitchTool('select');
@@ -541,7 +541,7 @@ export default function CanvasManager({
       onSelect({
         type: 'node',
         id: node.id,
-        isMulti: e.evt?.shiftKey || false,
+        isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
       });
       if (currentTool === 'node' && onSwitchTool) {
         onSwitchTool('select');
@@ -555,7 +555,7 @@ export default function CanvasManager({
       onSelect({
         type: 'edge',
         id: edgeId,
-        isMulti: e.evt?.shiftKey || false,
+        isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
       });
     }
   };
@@ -991,8 +991,8 @@ export default function CanvasManager({
               points={[
                 nodes.find((n) => n.id === edgeStartNodeId)?.x || 0,
                 nodes.find((n) => n.id === edgeStartNodeId)?.y || 0,
-                mousePos.x,
-                mousePos.y,
+                mousePos.x || 0,
+                mousePos.y || 0,
               ]}
               stroke={THEME.path.color}
               strokeWidth={THEME.path.width / scale}
@@ -1012,8 +1012,8 @@ export default function CanvasManager({
             return (
               <Group
                 key={node.id}
-                x={node.x}
-                y={node.y}
+                x={isNaN(node.x) ? 0 : node.x}
+                y={isNaN(node.y) ? 0 : node.y}
                 draggable={currentTool === 'select'}
                 onClick={(e) => handleNodeClick(e, node)}
                 onTap={(e) => handleNodeClick(e, node)}

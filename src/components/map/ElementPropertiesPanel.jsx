@@ -1,5 +1,5 @@
 import { CATEGORY_COLORS, CATEGORY_LABELS } from '../../lib/theme';
-import { Trash2, X, Move, Compass, Tag, Link2, QrCode } from 'lucide-react';
+import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers } from 'lucide-react';
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
@@ -12,7 +12,7 @@ const NODE_TYPE_OPTIONS = [
 ];
 
 export default function ElementPropertiesPanel({
-  selection, // { type: 'room' | 'node' | 'edge' | null, id: string | null }
+  selection, // { type, id, ids: Set, items: [] }
   rooms,
   nodes,
   edges,
@@ -23,13 +23,139 @@ export default function ElementPropertiesPanel({
   onUpdateNode,
   onDeleteNode,
   onDeleteEdge,
+  onDeleteSelected,
   onToggleQr,
   onClose,
 }) {
-  if (!selection || !selection.type || !selection.id) return null;
+  if (!selection || (!selection.id && (!selection.ids || selection.ids.size === 0))) {
+    return null;
+  }
 
-  // Render Room Properties
-  if (selection.type === 'room') {
+  const selectedCount = selection.ids ? selection.ids.size : selection.id ? 1 : 0;
+
+  // ==========================================
+  // MULTI-SELECTION VIEW
+  // ==========================================
+  if (selectedCount > 1) {
+    const selectedIds = Array.from(selection.ids);
+    const selectedRooms = rooms.filter((r) => selectedIds.includes(r.id));
+    const selectedNodes = nodes.filter((n) => selectedIds.includes(n.id));
+    const selectedEdges = edges.filter((e) => selectedIds.includes(e.id));
+
+    return (
+      <div style={panelContainerStyle}>
+        {/* Header */}
+        <div style={headerStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Layers size={16} className="text-blue-400" />
+            <h3 style={{ fontWeight: 600, fontSize: '0.95rem' }}>Multi-Selection</h3>
+          </div>
+          <button onClick={onClose} style={closeButtonStyle} title="Close / Deselect All">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Count Summary */}
+        <div style={{ marginBottom: '14px', padding: '10px', background: 'rgba(59, 130, 246, 0.1)', borderRadius: '10px', border: '1px solid rgba(59, 130, 246, 0.25)' }}>
+          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#93c5fd' }}>
+            {selectedCount} elements selected
+          </div>
+          <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+            {selectedRooms.length > 0 && (
+              <span style={badgeStyle}>
+                <Tag size={11} style={{ marginRight: '4px' }} />
+                {selectedRooms.length} Room{selectedRooms.length > 1 ? 's' : ''}
+              </span>
+            )}
+            {selectedNodes.length > 0 && (
+              <span style={badgeStyle}>
+                <Compass size={11} style={{ marginRight: '4px' }} />
+                {selectedNodes.length} Node{selectedNodes.length > 1 ? 's' : ''}
+              </span>
+            )}
+            {selectedEdges.length > 0 && (
+              <span style={badgeStyle}>
+                <Link2 size={11} style={{ marginRight: '4px' }} />
+                {selectedEdges.length} Path{selectedEdges.length > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Selected Items List */}
+        <div style={{ marginBottom: '16px', maxHeight: '180px', overflowY: 'auto' }}>
+          <label style={labelStyle}>Selected Elements</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {selectedRooms.map((r) => (
+              <div key={r.id} style={itemRowStyle}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
+                  <Tag size={12} className="text-blue-400" />
+                  {r.name}
+                </span>
+                <button
+                  onClick={() => onDeleteRoom(r.id)}
+                  style={itemDeleteBtnStyle}
+                  title="Remove this room"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+            {selectedNodes.map((n) => (
+              <div key={n.id} style={itemRowStyle}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
+                  <Compass size={12} className="text-orange-400" />
+                  {n.type} ({Math.round(n.x)}, {Math.round(n.y)})
+                </span>
+                <button
+                  onClick={() => onDeleteNode(n.id)}
+                  style={itemDeleteBtnStyle}
+                  title="Remove this node"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+            {selectedEdges.map((e) => (
+              <div key={e.id} style={itemRowStyle}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
+                  <Link2 size={12} className="text-cyan-400" />
+                  Path segment
+                </span>
+                <button
+                  onClick={() => onDeleteEdge(e.id)}
+                  style={itemDeleteBtnStyle}
+                  title="Remove this path"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Bulk Delete Button */}
+        <button
+          onClick={onDeleteSelected}
+          style={{
+            ...deleteButtonStyle,
+            background: 'rgba(239, 68, 68, 0.2)',
+            borderColor: 'rgba(239, 68, 68, 0.4)',
+            color: '#fca5a5',
+            fontWeight: 600,
+          }}
+        >
+          <Trash2 size={15} style={{ marginRight: '6px' }} />
+          Delete Selected ({selectedCount})
+        </button>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // SINGLE ROOM VIEW
+  // ==========================================
+  if (selection.type === 'room' || (rooms.some((r) => r.id === selection.id))) {
     const room = rooms.find((r) => r.id === selection.id);
     if (!room) return null;
 
@@ -37,7 +163,6 @@ export default function ElementPropertiesPanel({
 
     return (
       <div style={panelContainerStyle}>
-        {/* Header */}
         <div style={headerStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Tag size={16} className="text-blue-400" />
@@ -55,7 +180,7 @@ export default function ElementPropertiesPanel({
             type="text"
             value={room.name || ''}
             onChange={(e) => onUpdateRoom({ ...room, name: e.target.value })}
-            placeholder="e.g. Room 101, Lab A"
+            placeholder="e.g. Living Room, Bedroom"
             style={inputStyle}
           />
         </div>
@@ -145,8 +270,10 @@ export default function ElementPropertiesPanel({
     );
   }
 
-  // Render Node Properties
-  if (selection.type === 'node') {
+  // ==========================================
+  // SINGLE NODE VIEW
+  // ==========================================
+  if (selection.type === 'node' || (nodes.some((n) => n.id === selection.id))) {
     const node = nodes.find((n) => n.id === selection.id);
     if (!node) return null;
 
@@ -154,7 +281,6 @@ export default function ElementPropertiesPanel({
 
     return (
       <div style={panelContainerStyle}>
-        {/* Header */}
         <div style={headerStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Compass size={16} className="text-orange-400" />
@@ -251,8 +377,10 @@ export default function ElementPropertiesPanel({
     );
   }
 
-  // Render Edge Properties
-  if (selection.type === 'edge') {
+  // ==========================================
+  // SINGLE EDGE VIEW
+  // ==========================================
+  if (selection.type === 'edge' || (edges.some((e) => e.id === selection.id))) {
     const edge = edges.find((e) => e.id === selection.id);
     if (!edge) return null;
 
@@ -263,13 +391,12 @@ export default function ElementPropertiesPanel({
     if (n1 && n2) {
       const dx = n2.x - n1.x;
       const dy = n2.y - n1.y;
-      pixelDist = Math.sqrt(dx * dx + dy * dy);
+      pixelDist = Math.hypot(dx, dy);
     }
     const meterDist = pixelsPerMeter > 0 ? (pixelDist / pixelsPerMeter).toFixed(2) : '0';
 
     return (
       <div style={panelContainerStyle}>
-        {/* Header */}
         <div style={headerStyle}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Link2 size={16} className="text-blue-400" />
@@ -287,11 +414,10 @@ export default function ElementPropertiesPanel({
             {meterDist} <span style={{ fontSize: '0.85rem', fontWeight: 400, color: '#bfdbfe' }}>meters</span>
           </div>
           <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: '4px' }}>
-            {Math.round(pixelDist)} canvas pixels
+            {Math.round(pixelDist)} canvas pixels ({pixelsPerMeter.toFixed(1)} px/m)
           </div>
         </div>
 
-        {/* Connected Nodes info */}
         <div style={{ marginBottom: '16px', fontSize: '0.78rem', color: '#9ca3af' }}>
           <div>From: <span style={{ color: '#f3f4f6' }}>{n1 ? `${n1.type} (${Math.round(n1.x)}, ${Math.round(n1.y)})` : 'Unknown'}</span></div>
           <div style={{ marginTop: '4px' }}>To: <span style={{ color: '#f3f4f6' }}>{n2 ? `${n2.type} (${Math.round(n2.x)}, ${Math.round(n2.y)})` : 'Unknown'}</span></div>
@@ -317,8 +443,8 @@ const panelContainerStyle = {
   position: 'absolute',
   top: '80px',
   right: '16px',
-  width: '290px',
-  background: 'rgba(12, 12, 18, 0.94)',
+  width: '300px',
+  background: 'rgba(12, 12, 18, 0.95)',
   backdropFilter: 'blur(20px)',
   border: '1px solid rgba(255, 255, 255, 0.12)',
   borderRadius: '16px',
@@ -326,7 +452,6 @@ const panelContainerStyle = {
   zIndex: 30,
   boxShadow: '0 16px 40px rgba(0,0,0,0.6)',
   color: '#f0f0f5',
-  animation: 'fadeIn 0.15s ease-out',
 };
 
 const headerStyle = {
@@ -402,4 +527,34 @@ const deleteButtonStyle = {
   justifyContent: 'center',
   fontFamily: 'inherit',
   transition: 'all 0.15s',
+};
+
+const badgeStyle = {
+  fontSize: '0.7rem',
+  padding: '3px 8px',
+  borderRadius: '6px',
+  background: 'rgba(255, 255, 255, 0.08)',
+  color: '#d1d5db',
+  display: 'inline-flex',
+  alignItems: 'center',
+};
+
+const itemRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  padding: '5px 8px',
+  background: 'rgba(255, 255, 255, 0.03)',
+  borderRadius: '6px',
+  border: '1px solid rgba(255, 255, 255, 0.06)',
+};
+
+const itemDeleteBtnStyle = {
+  background: 'transparent',
+  border: 'none',
+  color: '#ef4444',
+  cursor: 'pointer',
+  padding: '2px',
+  display: 'flex',
+  alignItems: 'center',
 };
