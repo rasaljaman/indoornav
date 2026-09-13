@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Loader2, ChevronDown, CheckCircle2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
@@ -13,9 +13,13 @@ const INITIAL_STATE = {
   nodes: [],
   edges: [],
   qrPoints: [],
+  walls: [],
+  doors: [],
   deletedRoomIds: [],
   deletedNodeIds: [],
   deletedEdgeIds: [],
+  deletedWallIds: [],
+  deletedDoorIds: [],
 };
 
 export default function MapEditor() {
@@ -38,6 +42,17 @@ export default function MapEditor() {
   const [gridSize, setGridSize] = useState(20);
   const [snapEnabled, setSnapEnabled] = useState(true);
 
+  // Layer visibility state
+  const [layers, setLayers] = useState({
+    walls: true,
+    rooms: true,
+    graph: true,
+    blueprint: true,
+  });
+
+  // Door Corridor Node suggestion prompt state: { doorId, x, y }
+  const [doorNodeSuggestion, setDoorNodeSuggestion] = useState(null);
+
   // Floor picker state
   const [allFloors, setAllFloors] = useState([]);
   const [showFloorPicker, setShowFloorPicker] = useState(false);
@@ -59,13 +74,17 @@ export default function MapEditor() {
   } = useMapHistory(INITIAL_STATE);
 
   const {
-    rooms,
-    nodes,
-    edges,
-    qrPoints,
-    deletedRoomIds,
-    deletedNodeIds,
-    deletedEdgeIds,
+    rooms = [],
+    nodes = [],
+    edges = [],
+    qrPoints = [],
+    walls = [],
+    doors = [],
+    deletedRoomIds = [],
+    deletedNodeIds = [],
+    deletedEdgeIds = [],
+    deletedWallIds = [],
+    deletedDoorIds = [],
   } = state;
 
   // Track unsaved changes
@@ -74,6 +93,7 @@ export default function MapEditor() {
 
   // Unified Selection State: { type: 'room' | 'node' | 'edge' | null, id: string | null, ids: Set }
   const [selection, setSelection] = useState({ type: null, id: null, ids: new Set() });
+  const handleSaveRef = useRef(null);
 
   // Load Floor & Map Data from Supabase
   useEffect(() => {
@@ -130,7 +150,23 @@ export default function MapEditor() {
           if (qd) qrData = qd;
         }
 
-        // 6. Load Org Slug
+        // 6. Load Walls & Doors
+        const { data: wallsData } = await supabase
+          .from('walls')
+          .select('*')
+          .eq('floor_id', floorId);
+
+        let doorsData = [];
+        if (wallsData && wallsData.length > 0) {
+          const wallIds = wallsData.map((w) => w.id);
+          const { data: dd } = await supabase
+            .from('doors')
+            .select('*')
+            .in('wall_id', wallIds);
+          if (dd) doorsData = dd;
+        }
+
+        // 7. Load Org Slug
         const { data: bldg } = await supabase
           .from('buildings')
           .select('org_id')
@@ -151,9 +187,13 @@ export default function MapEditor() {
           nodes: nodesData || [],
           edges: edgesData || [],
           qrPoints: qrData || [],
+          walls: wallsData || [],
+          doors: doorsData || [],
           deletedRoomIds: [],
           deletedNodeIds: [],
           deletedEdgeIds: [],
+          deletedWallIds: [],
+          deletedDoorIds: [],
         });
         setSavedHistoryMarker(0);
       } catch (err) {
@@ -225,6 +265,16 @@ export default function MapEditor() {
     pushState((prev) => ({ ...prev, edges: updatedEdges }), 'Update edges');
   }, [pushState]);
 
+  // Update Walls
+  const handleWallsChange = useCallback((updatedWalls) => {
+    pushState((prev) => ({ ...prev, walls: updatedWalls }), 'Update walls');
+  }, [pushState]);
+
+  // Update Doors
+  const handleDoorsChange = useCallback((updatedDoors) => {
+    pushState((prev) => ({ ...prev, doors: updatedDoors }), 'Update doors');
+  }, [pushState]);
+
   // Delete Handlers
   const handleDeleteRoom = useCallback((roomId) => {
     pushState((prev) => ({
@@ -232,7 +282,7 @@ export default function MapEditor() {
       rooms: prev.rooms.filter((r) => r.id !== roomId),
       deletedRoomIds: [...prev.deletedRoomIds, roomId],
     }), 'Delete room');
-    setSelection({ type: null, id: null, ids: new Set() });
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
   }, [pushState]);
 
   const handleDeleteNode = useCallback((nodeId) => {
@@ -252,7 +302,7 @@ export default function MapEditor() {
         deletedEdgeIds: [...prev.deletedEdgeIds, ...connectedEdgeIds],
       };
     }, 'Delete node');
-    setSelection({ type: null, id: null, ids: new Set() });
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
   }, [pushState]);
 
   const handleDeleteEdge = useCallback((edgeId) => {
@@ -261,8 +311,75 @@ export default function MapEditor() {
       edges: prev.edges.filter((e) => e.id !== edgeId),
       deletedEdgeIds: [...prev.deletedEdgeIds, edgeId],
     }), 'Delete edge');
-    setSelection({ type: null, id: null, ids: new Set() });
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
   }, [pushState]);
+
+  const handleDeleteWall = useCallback((wallId) => {
+    pushState((prev) => {
+      const remainingWalls = (prev.walls || []).filter((w) => w.id !== wallId);
+      const childDoors = (prev.doors || []).filter((d) => d.wall_id === wallId);
+      const childDoorIds = childDoors.map((d) => d.id);
+      const remainingDoors = (prev.doors || []).filter((d) => d.wall_id !== wallId);
+
+      return {
+        ...prev,
+        walls: remainingWalls,
+        doors: remainingDoors,
+        deletedWallIds: [...(prev.deletedWallIds || []), wallId],
+        deletedDoorIds: [...(prev.deletedDoorIds || []), ...childDoorIds],
+      };
+    }, 'Delete wall');
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
+  }, [pushState]);
+
+  const handleDeleteDoor = useCallback((doorId) => {
+    pushState((prev) => ({
+      ...prev,
+      doors: (prev.doors || []).filter((d) => d.id !== doorId),
+      deletedDoorIds: [...(prev.deletedDoorIds || []), doorId],
+    }), 'Delete door');
+    setSelection({ type: null, id: null, ids: new Set(), items: [] });
+  }, [pushState]);
+
+  // Door Node Suggestion Placement
+  const handleAddDoorWithSuggestion = useCallback((newDoor, coords) => {
+    pushState((prev) => ({
+      ...prev,
+      doors: [...(prev.doors || []), newDoor],
+    }), 'Place door');
+
+    if (coords && coords.x !== undefined && coords.y !== undefined) {
+      setDoorNodeSuggestion({
+        doorId: newDoor.id,
+        x: coords.x,
+        y: coords.y,
+      });
+    }
+  }, [pushState]);
+
+  const handleAcceptDoorNode = useCallback(() => {
+    if (!doorNodeSuggestion) return;
+    const newNode = {
+      id: crypto.randomUUID(),
+      floor_id: floorId,
+      x: Math.round(doorNodeSuggestion.x),
+      y: Math.round(doorNodeSuggestion.y),
+      type: 'room_door',
+    };
+    pushState((prev) => ({
+      ...prev,
+      nodes: [...prev.nodes, newNode],
+    }), 'Add corridor node at door');
+    setDoorNodeSuggestion(null);
+  }, [doorNodeSuggestion, floorId, pushState]);
+
+  const handleDismissDoorNode = useCallback(() => {
+    setDoorNodeSuggestion(null);
+  }, []);
+
+  const handleToggleLayer = useCallback((layerId) => {
+    setLayers((prev) => ({ ...prev, [layerId]: !prev[layerId] }));
+  }, []);
 
   // Delete Currently Selected Item(s)
   const handleDeleteSelected = useCallback(() => {
@@ -283,6 +400,18 @@ export default function MapEditor() {
         .filter((n) => idsToDelete.includes(n.id))
         .map((n) => n.id);
 
+      const remainingWalls = (prev.walls || []).filter((w) => !idsToDelete.includes(w.id));
+      const newDeletedWallIds = (prev.walls || [])
+        .filter((w) => idsToDelete.includes(w.id))
+        .map((w) => w.id);
+
+      const remainingDoors = (prev.doors || []).filter(
+        (d) => !idsToDelete.includes(d.id) && !newDeletedWallIds.includes(d.wall_id)
+      );
+      const newDeletedDoorIds = (prev.doors || [])
+        .filter((d) => idsToDelete.includes(d.id) || newDeletedWallIds.includes(d.wall_id))
+        .map((d) => d.id);
+
       const connectedEdges = prev.edges.filter(
         (e) =>
           idsToDelete.includes(e.id) ||
@@ -300,9 +429,13 @@ export default function MapEditor() {
         nodes: remainingNodes,
         edges: remainingEdges,
         qrPoints: remainingQr,
+        walls: remainingWalls,
+        doors: remainingDoors,
         deletedRoomIds: [...(prev.deletedRoomIds || []), ...newDeletedRoomIds],
         deletedNodeIds: [...(prev.deletedNodeIds || []), ...newDeletedNodeIds],
         deletedEdgeIds: [...(prev.deletedEdgeIds || []), ...connectedEdgeIds],
+        deletedWallIds: [...(prev.deletedWallIds || []), ...newDeletedWallIds],
+        deletedDoorIds: [...(prev.deletedDoorIds || []), ...newDeletedDoorIds],
       };
     }, 'Delete selected item(s)');
 
@@ -337,6 +470,13 @@ export default function MapEditor() {
         return;
       }
 
+      // Save: Ctrl+S / Cmd+S
+      if (isCmdOrCtrl && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (handleSaveRef.current) handleSaveRef.current();
+        return;
+      }
+
       // Delete / Backspace
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -347,6 +487,12 @@ export default function MapEditor() {
       // Quick Tool Keys
       if (!isCmdOrCtrl && !e.altKey) {
         switch (e.key.toLowerCase()) {
+          case 'w':
+            setCurrentTool('wall');
+            break;
+          case 'd':
+            setCurrentTool('door');
+            break;
           case 'v':
             setCurrentTool('select');
             break;
@@ -463,6 +609,13 @@ export default function MapEditor() {
 
     try {
       // 1. Delete removed items in foreign-key safe order
+      if (deletedDoorIds.length > 0) {
+        await supabase.from('doors').delete().in('id', deletedDoorIds);
+      }
+      if (deletedWallIds.length > 0) {
+        await supabase.from('doors').delete().in('wall_id', deletedWallIds);
+        await supabase.from('walls').delete().in('id', deletedWallIds);
+      }
       if (deletedEdgeIds.length > 0) {
         await supabase.from('edges').delete().in('id', deletedEdgeIds);
       }
@@ -476,21 +629,49 @@ export default function MapEditor() {
         await supabase.from('nodes').delete().in('id', deletedNodeIds);
       }
 
-      // 2. Upsert Rooms
+      // 2. Upsert Walls
+      if (walls.length > 0) {
+        const wallsToSave = walls.map((w) => ({
+          id: w.id,
+          floor_id: floorId,
+          x1: w.x1,
+          y1: w.y1,
+          x2: w.x2,
+          y2: w.y2,
+          thickness: w.thickness || 12,
+        }));
+        const { error: wErr } = await supabase.from('walls').upsert(wallsToSave);
+        if (wErr) throw wErr;
+      }
+
+      // 3. Upsert Doors
+      if (doors.length > 0) {
+        const doorsToSave = doors.map((d) => ({
+          id: d.id,
+          wall_id: d.wall_id,
+          position_along_wall: d.position_along_wall,
+          width: d.width || 40,
+          swing_direction: d.swing_direction || 'right_in',
+        }));
+        const { error: dErr } = await supabase.from('doors').upsert(doorsToSave);
+        if (dErr) throw dErr;
+      }
+
+      // 4. Upsert Rooms
       if (rooms.length > 0) {
         const roomsToSave = rooms.map((r) => ({ ...r, floor_id: floorId }));
         const { error: rErr } = await supabase.from('rooms').upsert(roomsToSave);
         if (rErr) throw rErr;
       }
 
-      // 3. Upsert Nodes
+      // 5. Upsert Nodes
       if (nodes.length > 0) {
         const nodesToSave = nodes.map((n) => ({ ...n, floor_id: floorId }));
         const { error: nErr } = await supabase.from('nodes').upsert(nodesToSave);
         if (nErr) throw nErr;
       }
 
-      // 4. Compute accurate edge weights and upsert Edges
+      // 6. Compute accurate edge weights and upsert Edges
       if (edges.length > 0) {
         const edgesToSave = edges.map((edge) => {
           const n1 = nodes.find((n) => n.id === edge.from_node);
@@ -508,12 +689,14 @@ export default function MapEditor() {
         if (eErr) throw eErr;
       }
 
-      // 5. Clear deletion queues in state and record saved history marker
+      // 7. Clear deletion queues in state and record saved history marker
       pushState((prev) => ({
         ...prev,
         deletedRoomIds: [],
         deletedNodeIds: [],
         deletedEdgeIds: [],
+        deletedWallIds: [],
+        deletedDoorIds: [],
       }), 'Save map');
       setSavedHistoryMarker(historyLength + 1);
 
@@ -527,6 +710,7 @@ export default function MapEditor() {
       setSaving(false);
     }
   };
+  handleSaveRef.current = handleSave;
 
   if (loading) {
     return (
@@ -543,7 +727,7 @@ export default function MapEditor() {
       <div className="absolute top-0 left-0 right-0 w-full h-16 bg-gradient-to-b from-black/85 via-black/50 to-transparent flex items-center justify-between px-6 z-20 pointer-events-none">
         <button
           onClick={() => navigate('/admin')}
-          className="pointer-events-auto flex items-center gap-2 text-gray-300 hover:text-white transition-colors bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/10 text-sm font-medium"
+          className="pointer-events-auto flex items-center gap-2 text-gray-300 hover:text-white transition-colors bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/10 text-sm font-medium cursor-pointer"
         >
           <ArrowLeft size={18} />
           Dashboard
@@ -600,7 +784,7 @@ export default function MapEditor() {
 
           <button
             onClick={() => navigate(`/admin/buildings/${buildingId}/floors/${floorId}/print-qrs`)}
-            className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-xl font-medium transition-colors"
+            className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-xl font-medium transition-colors cursor-pointer"
           >
             Print QRs
           </button>
@@ -639,6 +823,8 @@ export default function MapEditor() {
         snapEnabled={snapEnabled}
         onToggleSnap={() => setSnapEnabled(!snapEnabled)}
         hasUnsavedChanges={hasUnsavedChanges}
+        layers={layers}
+        onToggleLayer={handleToggleLayer}
       />
 
       {/* Interactive Konva Canvas */}
@@ -651,11 +837,18 @@ export default function MapEditor() {
         nodes={nodes}
         edges={edges}
         qrPoints={qrPoints}
+        walls={walls}
+        doors={doors}
+        layers={layers}
+        pixelsPerMeter={pixelsPerMeter}
         selection={selection}
         onSelect={handleSelect}
         onRoomsChange={handleRoomsChange}
         onNodesChange={handleNodesChange}
         onEdgesChange={handleEdgesChange}
+        onWallsChange={handleWallsChange}
+        onDoorsChange={handleDoorsChange}
+        onAddDoorWithSuggestion={handleAddDoorWithSuggestion}
         onScaleCalibrated={handleScaleCalibrated}
         onNodeQrClick={handleToggleQr}
         onDeleteSelected={handleDeleteSelected}
@@ -671,6 +864,8 @@ export default function MapEditor() {
         nodes={nodes}
         edges={edges}
         qrPoints={qrPoints}
+        walls={walls}
+        doors={doors}
         pixelsPerMeter={pixelsPerMeter}
         onUpdateRoom={(updatedRoom) => {
           pushState((prev) => ({
@@ -687,10 +882,69 @@ export default function MapEditor() {
         }}
         onDeleteNode={handleDeleteNode}
         onDeleteEdge={handleDeleteEdge}
+        onUpdateWall={(updatedWall) => {
+          pushState((prev) => ({
+            ...prev,
+            walls: (prev.walls || []).map((w) => (w.id === updatedWall.id ? updatedWall : w)),
+          }), 'Update wall properties');
+        }}
+        onDeleteWall={handleDeleteWall}
+        onUpdateDoor={(updatedDoor) => {
+          pushState((prev) => ({
+            ...prev,
+            doors: (prev.doors || []).map((d) => (d.id === updatedDoor.id ? updatedDoor : d)),
+          }), 'Update door properties');
+        }}
+        onDeleteDoor={handleDeleteDoor}
+        onAddNodeAtDoor={(door) => {
+          const parentWall = (walls || []).find((w) => w.id === door.wall_id);
+          if (!parentWall) return;
+          const t = door.position_along_wall;
+          const doorX = parentWall.x1 + t * (parentWall.x2 - parentWall.x1);
+          const doorY = parentWall.y1 + t * (parentWall.y2 - parentWall.y1);
+          const newNode = {
+            id: crypto.randomUUID(),
+            floor_id: floorId,
+            x: Math.round(doorX),
+            y: Math.round(doorY),
+            type: 'room_door',
+          };
+          pushState((prev) => ({
+            ...prev,
+            nodes: [...prev.nodes, newNode],
+          }), 'Add corridor node at door');
+        }}
         onDeleteSelected={handleDeleteSelected}
         onToggleQr={handleToggleQr}
         onClose={() => setSelection({ type: null, id: null, ids: new Set(), items: [] })}
       />
+
+      {/* Floating Prompt: Add Corridor Node at Door */}
+      {doorNodeSuggestion && (
+        <div className="absolute bottom-6 right-6 z-40 bg-[#0d0d14]/95 border border-blue-500/40 backdrop-blur-2xl rounded-2xl p-4 shadow-2xl flex items-center gap-4 animate-fadeIn">
+          <div className="flex items-center gap-2.5">
+            <span className="text-xl">🚪</span>
+            <div>
+              <div className="text-sm font-semibold text-white">Door Placed</div>
+              <div className="text-xs text-gray-400">Add a corridor node at this door position?</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAcceptDoorNode}
+              className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md transition-colors cursor-pointer"
+            >
+              Add Node
+            </button>
+            <button
+              onClick={handleDismissDoorNode}
+              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-gray-300 hover:text-white rounded-xl text-xs font-medium transition-colors cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Scale Calibration Dialog */}
       {calibrationPts && (

@@ -1,5 +1,5 @@
 import { CATEGORY_COLORS, CATEGORY_LABELS } from '../../lib/theme';
-import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers } from 'lucide-react';
+import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers, BrickWall, DoorOpen } from 'lucide-react';
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
@@ -13,16 +13,23 @@ const NODE_TYPE_OPTIONS = [
 
 export default function ElementPropertiesPanel({
   selection, // { type, id, ids: Set, items: [] }
-  rooms,
-  nodes,
-  edges,
-  qrPoints,
+  rooms = [],
+  nodes = [],
+  edges = [],
+  qrPoints = [],
+  walls = [],
+  doors = [],
   pixelsPerMeter = 1,
   onUpdateRoom,
   onDeleteRoom,
   onUpdateNode,
   onDeleteNode,
   onDeleteEdge,
+  onUpdateWall,
+  onDeleteWall,
+  onUpdateDoor,
+  onDeleteDoor,
+  onAddNodeAtDoor,
   onDeleteSelected,
   onToggleQr,
   onClose,
@@ -41,6 +48,8 @@ export default function ElementPropertiesPanel({
     const selectedRooms = rooms.filter((r) => selectedIds.includes(r.id));
     const selectedNodes = nodes.filter((n) => selectedIds.includes(n.id));
     const selectedEdges = edges.filter((e) => selectedIds.includes(e.id));
+    const selectedWalls = (walls || []).filter((w) => selectedIds.includes(w.id));
+    const selectedDoors = (doors || []).filter((d) => selectedIds.includes(d.id));
 
     return (
       <div style={panelContainerStyle}>
@@ -61,6 +70,18 @@ export default function ElementPropertiesPanel({
             {selectedCount} elements selected
           </div>
           <div style={{ display: 'flex', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+            {selectedWalls.length > 0 && (
+              <span style={badgeStyle}>
+                <BrickWall size={11} style={{ marginRight: '4px' }} className="text-amber-400" />
+                {selectedWalls.length} Wall{selectedWalls.length > 1 ? 's' : ''}
+              </span>
+            )}
+            {selectedDoors.length > 0 && (
+              <span style={badgeStyle}>
+                <DoorOpen size={11} style={{ marginRight: '4px' }} className="text-emerald-400" />
+                {selectedDoors.length} Door{selectedDoors.length > 1 ? 's' : ''}
+              </span>
+            )}
             {selectedRooms.length > 0 && (
               <span style={badgeStyle}>
                 <Tag size={11} style={{ marginRight: '4px' }} />
@@ -86,6 +107,36 @@ export default function ElementPropertiesPanel({
         <div style={{ marginBottom: '16px', maxHeight: '180px', overflowY: 'auto' }}>
           <label style={labelStyle}>Selected Elements</label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {selectedWalls.map((w) => (
+              <div key={w.id} style={itemRowStyle}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
+                  <BrickWall size={12} className="text-amber-400" />
+                  Wall ({Math.round(w.x1)}, {Math.round(w.y1)}) → ({Math.round(w.x2)}, {Math.round(w.y2)})
+                </span>
+                <button
+                  onClick={() => onDeleteWall && onDeleteWall(w.id)}
+                  style={itemDeleteBtnStyle}
+                  title="Remove this wall"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+            {selectedDoors.map((d) => (
+              <div key={d.id} style={itemRowStyle}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
+                  <DoorOpen size={12} className="text-emerald-400" />
+                  Door ({Math.round((d.position_along_wall || 0.5) * 100)}%)
+                </span>
+                <button
+                  onClick={() => onDeleteDoor && onDeleteDoor(d.id)}
+                  style={itemDeleteBtnStyle}
+                  title="Remove this door"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
             {selectedRooms.map((r) => (
               <div key={r.id} style={itemRowStyle}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#e5e7eb' }}>
@@ -430,6 +481,199 @@ export default function ElementPropertiesPanel({
         >
           <Trash2 size={14} style={{ marginRight: '6px' }} />
           Delete Path Segment
+        </button>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // SINGLE WALL VIEW
+  // ==========================================
+  if (selection.type === 'wall' || (walls && walls.some((w) => w.id === selection.id))) {
+    const wall = (walls || []).find((w) => w.id === selection.id);
+    if (!wall) return null;
+
+    const dx = wall.x2 - wall.x1;
+    const dy = wall.y2 - wall.y1;
+    const pixelLen = Math.hypot(dx, dy);
+    const meterLen = (pixelLen / pixelsPerMeter).toFixed(2);
+    const thickness = wall.thickness || 12;
+    const thicknessCm = ((thickness / pixelsPerMeter) * 100).toFixed(1);
+    const attachedDoors = (doors || []).filter((d) => d.wall_id === wall.id);
+
+    return (
+      <div style={panelContainerStyle}>
+        <div style={headerStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <BrickWall size={16} className="text-amber-400" />
+            <h3 style={{ fontWeight: 600, fontSize: '0.95rem' }}>Wall Properties</h3>
+          </div>
+          <button onClick={onClose} style={closeButtonStyle} title="Close Panel">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Wall Length Readout */}
+        <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(255,255,255,0.04)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <div style={{ fontSize: '0.72rem', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Wall Length
+          </div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 700, color: '#f3f4f6', marginTop: '2px' }}>
+            {meterLen} <span style={{ fontSize: '0.85rem', fontWeight: 400, color: '#bfdbfe' }}>meters</span>
+          </div>
+          <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: '4px' }}>
+            {Math.round(pixelLen)} canvas pixels
+          </div>
+        </div>
+
+        {/* Thickness Input */}
+        <div style={{ marginBottom: '14px' }}>
+          <label style={labelStyle}>Thickness ({thicknessCm} cm)</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="number"
+              min="4"
+              max="50"
+              value={Math.round(thickness)}
+              onChange={(e) => onUpdateWall && onUpdateWall({ ...wall, thickness: Math.max(4, parseFloat(e.target.value) || 12) })}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>px</span>
+          </div>
+        </div>
+
+        {/* Attached Doors count & coords */}
+        <div style={{ marginBottom: '16px', fontSize: '0.78rem', color: '#9ca3af' }}>
+          <div>Attached Doors: <span style={{ color: '#f3f4f6', fontWeight: 600 }}>{attachedDoors.length}</span></div>
+          <div style={{ marginTop: '4px' }}>From: ({Math.round(wall.x1)}, {Math.round(wall.y1)}) → To: ({Math.round(wall.x2)}, {Math.round(wall.y2)})</div>
+        </div>
+
+        {/* Delete Wall Button */}
+        <button
+          onClick={() => onDeleteWall && onDeleteWall(wall.id)}
+          style={deleteButtonStyle}
+        >
+          <Trash2 size={14} style={{ marginRight: '6px' }} />
+          Delete Wall
+        </button>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // SINGLE DOOR VIEW
+  // ==========================================
+  if (selection.type === 'door' || (doors && doors.some((d) => d.id === selection.id))) {
+    const door = (doors || []).find((d) => d.id === selection.id);
+    if (!door) return null;
+
+    const widthPx = door.width || 40;
+    const widthMeters = (widthPx / pixelsPerMeter).toFixed(2);
+    const posPercent = Math.round((door.position_along_wall || 0.5) * 100);
+
+    return (
+      <div style={panelContainerStyle}>
+        <div style={headerStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <DoorOpen size={16} className="text-emerald-400" />
+            <h3 style={{ fontWeight: 600, fontSize: '0.95rem' }}>Door Properties</h3>
+          </div>
+          <button onClick={onClose} style={closeButtonStyle} title="Close Panel">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Door Width */}
+        <div style={{ marginBottom: '14px' }}>
+          <label style={labelStyle}>Door Opening ({widthMeters} m)</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="number"
+              min="15"
+              max="150"
+              value={Math.round(widthPx)}
+              onChange={(e) => onUpdateDoor && onUpdateDoor({ ...door, width: Math.max(15, parseFloat(e.target.value) || 40) })}
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>px</span>
+          </div>
+        </div>
+
+        {/* Position along wall slider */}
+        <div style={{ marginBottom: '14px' }}>
+          <label style={labelStyle}>Position Along Wall ({posPercent}%)</label>
+          <input
+            type="range"
+            min="10"
+            max="90"
+            value={posPercent}
+            onChange={(e) => onUpdateDoor && onUpdateDoor({ ...door, position_along_wall: parseFloat(e.target.value) / 100 })}
+            style={{ width: '100%', accentColor: '#3B82F6' }}
+          />
+        </div>
+
+        {/* Swing Direction */}
+        <div style={{ marginBottom: '16px' }}>
+          <label style={labelStyle}>Swing Orientation</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+            {[
+              { id: 'right_in', label: 'Right In' },
+              { id: 'left_in', label: 'Left In' },
+              { id: 'right_out', label: 'Right Out' },
+              { id: 'left_out', label: 'Left Out' },
+            ].map((dir) => (
+              <button
+                key={dir.id}
+                onClick={() => onUpdateDoor && onUpdateDoor({ ...door, swing_direction: dir.id })}
+                style={{
+                  padding: '6px',
+                  borderRadius: '8px',
+                  fontSize: '0.72rem',
+                  fontWeight: door.swing_direction === dir.id ? 600 : 400,
+                  border: door.swing_direction === dir.id ? '1px solid #3B82F6' : '1px solid rgba(255,255,255,0.1)',
+                  background: door.swing_direction === dir.id ? 'rgba(59, 130, 246, 0.2)' : 'rgba(255,255,255,0.03)',
+                  color: door.swing_direction === dir.id ? '#60A5FA' : '#9ca3af',
+                  cursor: 'pointer',
+                }}
+              >
+                {dir.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Add corridor node at this door button */}
+        <div style={{ marginBottom: '16px' }}>
+          <button
+            onClick={() => onAddNodeAtDoor && onAddNodeAtDoor(door)}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              borderRadius: '8px',
+              background: 'rgba(59, 130, 246, 0.15)',
+              border: '1px solid rgba(59, 130, 246, 0.3)',
+              color: '#93c5fd',
+              fontSize: '0.78rem',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+            }}
+          >
+            <Compass size={13} />
+            Place Corridor Node at Door
+          </button>
+        </div>
+
+        {/* Delete Door */}
+        <button
+          onClick={() => onDeleteDoor && onDeleteDoor(door.id)}
+          style={deleteButtonStyle}
+        >
+          <Trash2 size={14} style={{ marginRight: '6px' }} />
+          Delete Door
         </button>
       </div>
     );

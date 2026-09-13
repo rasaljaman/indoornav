@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Shape } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Shape, Arc } from 'react-konva';
 import { Maximize2, ZoomIn, ZoomOut, RotateCcw, Check, Undo2, X, Trash2 } from 'lucide-react';
 
 // Node type visual config
@@ -35,6 +35,134 @@ const THEME = {
   }
 };
 
+// Helper: Calculate solid wall sub-segments by cutting gaps for doors
+function getWallSegmentsWithDoors(wall, wallDoors) {
+  const dx = wall.x2 - wall.x1;
+  const dy = wall.y2 - wall.y1;
+  const len = Math.hypot(dx, dy);
+
+  if (!wallDoors || wallDoors.length === 0 || len < 5) {
+    return [{ x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 }];
+  }
+
+  const intervals = wallDoors
+    .map((d) => {
+      const halfT = (d.width || 40) / len / 2;
+      const t = d.position_along_wall || 0.5;
+      return {
+        start: Math.max(0, t - halfT),
+        end: Math.min(1, t + halfT),
+        door: d,
+      };
+    })
+    .sort((a, b) => a.start - b.start);
+
+  const segments = [];
+  let currentT = 0;
+
+  for (const iv of intervals) {
+    if (iv.start > currentT + 0.005) {
+      segments.push({
+        x1: wall.x1 + currentT * dx,
+        y1: wall.y1 + currentT * dy,
+        x2: wall.x1 + iv.start * dx,
+        y2: wall.y1 + iv.start * dy,
+      });
+    }
+    currentT = Math.max(currentT, iv.end);
+  }
+
+  if (currentT < 0.995) {
+    segments.push({
+      x1: wall.x1 + currentT * dx,
+      y1: wall.y1 + currentT * dy,
+      x2: wall.x2,
+      y2: wall.y2,
+    });
+  }
+
+  return segments;
+}
+
+// Helper: Render architectural door symbol with open leaf and 90-degree swing arc
+function renderDoorSymbol(door, wall, scale, isSelected, onSelect) {
+  const dx = wall.x2 - wall.x1;
+  const dy = wall.y2 - wall.y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 5) return null;
+
+  const t = door.position_along_wall || 0.5;
+  const width = door.width || 40;
+  const halfT = width / len / 2;
+  const angleRad = Math.atan2(dy, dx);
+  const angleDeg = (angleRad * 180) / Math.PI;
+
+  const hx = wall.x1 + (t - halfT) * dx;
+  const hy = wall.y1 + (t - halfT) * dy;
+  const lx = wall.x1 + (t + halfT) * dx;
+  const ly = wall.y1 + (t + halfT) * dy;
+
+  const isOut = door.swing_direction?.includes('out');
+  const normalAngle = angleRad + (isOut ? -Math.PI / 2 : Math.PI / 2);
+  const leafEndX = hx + width * Math.cos(normalAngle);
+  const leafEndY = hy + width * Math.sin(normalAngle);
+
+  return (
+    <Group
+      key={door.id}
+      onClick={(e) => {
+        e.cancelBubble = true;
+        onSelect({
+          type: 'door',
+          id: door.id,
+          isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
+        });
+      }}
+    >
+      {/* Hit / click area across the opening */}
+      <Line
+        points={[hx, hy, lx, ly]}
+        stroke={isSelected ? '#3B82F6' : 'rgba(59, 130, 246, 0.15)'}
+        strokeWidth={14 / scale}
+        lineCap="round"
+        hitStrokeWidth={24 / scale}
+      />
+
+      {/* 90-degree Swing Arc */}
+      <Arc
+        x={hx}
+        y={hy}
+        innerRadius={0}
+        outerRadius={width}
+        angle={90}
+        rotation={isOut ? angleDeg - 90 : angleDeg}
+        stroke={isSelected ? '#2563EB' : 'rgba(59, 130, 246, 0.65)'}
+        strokeWidth={1.5 / scale}
+        dash={[3 / scale, 3 / scale]}
+        listening={false}
+      />
+
+      {/* Open Door Leaf */}
+      <Line
+        points={[hx, hy, leafEndX, leafEndY]}
+        stroke={isSelected ? '#2563EB' : '#3B82F6'}
+        strokeWidth={2.5 / scale}
+        lineCap="round"
+        listening={false}
+      />
+
+      {/* Hinge Pin */}
+      <Circle
+        x={hx}
+        y={hy}
+        radius={3 / scale}
+        fill={isSelected ? '#2563EB' : '#3B82F6'}
+        listening={false}
+      />
+    </Group>
+  );
+}
+
 export default function CanvasManager({
   currentTool,
   onSwitchTool,
@@ -44,11 +172,18 @@ export default function CanvasManager({
   nodes = [],
   edges = [],
   qrPoints = [],
+  walls = [],
+  doors = [],
+  layers = { walls: true, rooms: true, graph: true, blueprint: true },
+  pixelsPerMeter = 1,
   selection = { type: null, id: null, ids: new Set() },
   onSelect,
   onRoomsChange,
   onNodesChange,
   onEdgesChange,
+  onWallsChange,
+  onDoorsChange,
+  onAddDoorWithSuggestion,
   onScaleCalibrated,
   onNodeQrClick,
   onDeleteSelected,
@@ -100,6 +235,8 @@ export default function CanvasManager({
 
   // Drawing State
   const [currentRoomPts, setCurrentRoomPts] = useState([]);
+  const [currentWallPts, setCurrentWallPts] = useState([]); // [x1, y1] for current wall chain start
+  const [doorHoverPreview, setDoorHoverPreview] = useState(null); // { wallId, wall, t, x, y, width }
   const [currentScalePts, setCurrentScalePts] = useState([]);
   const [edgeStartNodeId, setEdgeStartNodeId] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
@@ -119,7 +256,7 @@ export default function CanvasManager({
     img.onload = () => setImage(img);
   }, [blueprintUrl]);
 
-  // Track Spacebar key
+  // Track Spacebar and Escape keys
   useEffect(() => {
     function handleKeyDown(e) {
       if (e.code === 'Space' && !e.repeat) {
@@ -127,6 +264,13 @@ export default function CanvasManager({
           e.preventDefault();
           setIsSpacePressed(true);
         }
+      }
+      if (e.key === 'Escape') {
+        setCurrentWallPts([]);
+        setCurrentRoomPts([]);
+        setCurrentScalePts([]);
+        setEdgeStartNodeId(null);
+        setDoorHoverPreview(null);
       }
     }
     function handleKeyUp(e) {
@@ -148,6 +292,48 @@ export default function CanvasManager({
     return Math.round(val / gridSize) * gridSize;
   }, [snapEnabled, gridSize]);
 
+  // Direct point snap to existing wall corners, room vertices, and nodes
+  const snapPointToElements = useCallback((rawX, rawY, excludeWallId = null) => {
+    const threshold = 14 / scale;
+
+    // 1. Existing wall endpoints (highest priority for clean room corners)
+    for (const w of walls) {
+      if (w.id === excludeWallId) continue;
+      if (Math.hypot(rawX - w.x1, rawY - w.y1) <= threshold) {
+        return { x: w.x1, y: w.y1, snapped: true, type: 'wall_corner' };
+      }
+      if (Math.hypot(rawX - w.x2, rawY - w.y2) <= threshold) {
+        return { x: w.x2, y: w.y2, snapped: true, type: 'wall_corner' };
+      }
+    }
+
+    // 2. Room vertices
+    for (const r of rooms) {
+      if (!r.shape_data) continue;
+      for (let i = 0; i < r.shape_data.length; i += 2) {
+        const rx = r.shape_data[i];
+        const ry = r.shape_data[i + 1];
+        if (Math.hypot(rawX - rx, rawY - ry) <= threshold) {
+          return { x: rx, y: ry, snapped: true, type: 'room_vertex' };
+        }
+      }
+    }
+
+    // 3. Nodes
+    for (const n of nodes) {
+      if (Math.hypot(rawX - n.x, rawY - n.y) <= threshold) {
+        return { x: n.x, y: n.y, snapped: true, type: 'node' };
+      }
+    }
+
+    // 4. Default grid snap
+    return {
+      x: snapCoord(rawX),
+      y: snapCoord(rawY),
+      snapped: false,
+    };
+  }, [walls, rooms, nodes, scale, snapCoord]);
+
   // Compute Alignment Candidates
   const getAlignmentCandidates = useCallback((excludeId, excludeType) => {
     const xTargets = [];
@@ -157,6 +343,14 @@ export default function CanvasManager({
       if (excludeType === 'node' && n.id === excludeId) return;
       xTargets.push({ pos: n.x, label: 'Node' });
       yTargets.push({ pos: n.y, label: 'Node' });
+    });
+
+    walls.forEach((w) => {
+      if (excludeType === 'wall' && w.id === excludeId) return;
+      xTargets.push({ pos: w.x1, label: 'Wall Corner' });
+      xTargets.push({ pos: w.x2, label: 'Wall Corner' });
+      yTargets.push({ pos: w.y1, label: 'Wall Corner' });
+      yTargets.push({ pos: w.y2, label: 'Wall Corner' });
     });
 
     rooms.forEach((r) => {
@@ -328,13 +522,15 @@ export default function CanvasManager({
 
   // Stage mouse events
   const handleMouseDown = (e) => {
-    if (e.evt.button === 1) {
+    const btn = e?.evt ? e.evt.button : e?.button;
+    if (btn === 1) {
       setIsMiddleMouseDown(true);
     }
   };
 
   const handleMouseUp = (e) => {
-    if (e.evt.button === 1) {
+    const btn = e?.evt ? e.evt.button : e?.button;
+    if (btn === 1) {
       setIsMiddleMouseDown(false);
     }
   };
@@ -345,10 +541,59 @@ export default function CanvasManager({
     const pointerPosition = stage.getPointerPosition();
     if (!pointerPosition) return;
 
-    const canvasX = (pointerPosition.x - stage.x()) / stage.scaleX();
-    const canvasY = (pointerPosition.y - stage.y()) / stage.scaleY();
+    const rawX = (pointerPosition.x - stage.x()) / stage.scaleX();
+    const rawY = (pointerPosition.y - stage.y()) / stage.scaleY();
 
-    setMousePos({ x: canvasX, y: canvasY });
+    if (currentTool === 'wall') {
+      const snap = snapPointToElements(rawX, rawY);
+      setMousePos({ x: snap.x, y: snap.y, snapped: snap.snapped });
+    } else if (currentTool === 'door') {
+      let bestWall = null;
+      let bestT = 0.5;
+      let bestDist = Infinity;
+      const threshold = 35 / scale;
+
+      for (const w of walls) {
+        const dx = w.x2 - w.x1;
+        const dy = w.y2 - w.y1;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq < 4) continue;
+
+        let t = ((rawX - w.x1) * dx + (rawY - w.y1) * dy) / lenSq;
+        t = Math.max(0.08, Math.min(0.92, t));
+
+        const projX = w.x1 + t * dx;
+        const projY = w.y1 + t * dy;
+        const dist = Math.hypot(rawX - projX, rawY - projY);
+
+        if (dist < threshold && dist < bestDist) {
+          bestDist = dist;
+          bestWall = w;
+          bestT = t;
+        }
+      }
+
+      if (bestWall) {
+        const defaultDoorWidth = Math.max(25, Math.round(pixelsPerMeter > 1 ? pixelsPerMeter * 0.9 : 40));
+        const projX = bestWall.x1 + bestT * (bestWall.x2 - bestWall.x1);
+        const projY = bestWall.y1 + bestT * (bestWall.y2 - bestWall.y1);
+        setDoorHoverPreview({
+          wallId: bestWall.id,
+          wall: bestWall,
+          t: bestT,
+          x: projX,
+          y: projY,
+          width: defaultDoorWidth,
+        });
+      } else {
+        setDoorHoverPreview(null);
+      }
+      setMousePos({ x: rawX, y: rawY });
+    } else {
+      const x = snapCoord(rawX);
+      const y = snapCoord(rawY);
+      setMousePos({ x, y });
+    }
   };
 
   // Stage DragEnd: sync stage position state so zooming never jumps
@@ -395,11 +640,9 @@ export default function CanvasManager({
     };
 
     const updatedRooms = [...rooms, newRoom];
-    // Push once into history
     onRoomsChange(updatedRooms);
     setCurrentRoomPts([]);
 
-    // Select the new room and auto-switch to select tool
     onSelect({ type: 'room', id: newRoom.id });
     if (onSwitchTool) {
       onSwitchTool('select');
@@ -430,29 +673,113 @@ export default function CanvasManager({
           e.preventDefault();
           finishRoomDrawing();
         }
+      } else if (currentWallPts.length > 0) {
+        if (e.key === 'Escape' || e.key === 'Enter') {
+          e.preventDefault();
+          setCurrentWallPts([]);
+        }
       }
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentRoomPts, cancelRoomDrawing, undoLastRoomPoint, finishRoomDrawing]);
+  }, [currentRoomPts, currentWallPts, cancelRoomDrawing, undoLastRoomPoint, finishRoomDrawing]);
 
   // Canvas Click (handling tools)
   const handleStageClick = (e) => {
-    if (e.evt.button === 1 || e.evt.button === 2) return;
+    const btn = e?.evt ? e.evt.button : e?.button;
+    if (btn === 1 || btn === 2) return;
     if (isSpacePressed || isMiddleMouseDown) return;
 
     const stage = e.target.getStage();
-    const pointerPosition = stage.getPointerPosition();
+    const pointerPosition = stage?.getPointerPosition();
     if (!pointerPosition) return;
 
     let rawX = (pointerPosition.x - stage.x()) / stage.scaleX();
     let rawY = (pointerPosition.y - stage.y()) / stage.scaleY();
 
+    // Wall Tool: Continuous chaining
+    if (currentTool === 'wall') {
+      const snap = snapPointToElements(rawX, rawY);
+      const targetX = snap.x;
+      const targetY = snap.y;
+
+      if (currentWallPts.length === 0) {
+        setCurrentWallPts([targetX, targetY]);
+      } else {
+        const [x1, y1] = currentWallPts;
+        if (Math.hypot(targetX - x1, targetY - y1) >= 5) {
+          const defaultThickness = Math.max(6, Math.round(pixelsPerMeter > 1 ? pixelsPerMeter * 0.12 : 12));
+          const newWall = {
+            id: crypto.randomUUID(),
+            x1,
+            y1,
+            x2: targetX,
+            y2: targetY,
+            thickness: defaultThickness,
+          };
+          onWallsChange([...walls, newWall]);
+          // Continuous chaining: next segment starts at this end point
+          setCurrentWallPts([targetX, targetY]);
+        }
+      }
+      return;
+    }
+
+    // Door Tool: Click on wall to place door
+    if (currentTool === 'door') {
+      let targetWall = null;
+      let targetT = 0.5;
+      let targetX = rawX;
+      let targetY = rawY;
+
+      if (doorHoverPreview) {
+        targetWall = doorHoverPreview.wall;
+        targetT = doorHoverPreview.t;
+        targetX = doorHoverPreview.x;
+        targetY = doorHoverPreview.y;
+      } else {
+        // Fallback: search nearest wall within threshold
+        let bestDist = Infinity;
+        const threshold = 45 / scale;
+        for (const w of walls) {
+          const dx = w.x2 - w.x1;
+          const dy = w.y2 - w.y1;
+          const lenSq = dx * dx + dy * dy;
+          if (lenSq < 4) continue;
+          let t = ((rawX - w.x1) * dx + (rawY - w.y1) * dy) / lenSq;
+          t = Math.max(0.08, Math.min(0.92, t));
+          const px = w.x1 + t * dx;
+          const py = w.y1 + t * dy;
+          const dist = Math.hypot(rawX - px, rawY - py);
+          if (dist < threshold && dist < bestDist) {
+            bestDist = dist;
+            targetWall = w;
+            targetT = t;
+            targetX = px;
+            targetY = py;
+          }
+        }
+      }
+
+      if (targetWall) {
+        const defaultDoorWidth = Math.max(25, Math.round(pixelsPerMeter > 1 ? pixelsPerMeter * 0.9 : 40));
+        const newDoor = {
+          id: crypto.randomUUID(),
+          wall_id: targetWall.id,
+          position_along_wall: targetT,
+          width: defaultDoorWidth,
+          swing_direction: 'right_in',
+        };
+        onAddDoorWithSuggestion(newDoor, { x: targetX, y: targetY });
+        setDoorHoverPreview(null);
+      }
+      return;
+    }
+
     const x = snapCoord(rawX);
     const y = snapCoord(rawY);
 
     if (currentTool === 'room') {
-      // Check if clicked near the start point to close room
       if (currentRoomPts.length >= 6) {
         const startX = currentRoomPts[0];
         const startY = currentRoomPts[1];
@@ -487,17 +814,120 @@ export default function CanvasManager({
     }
   };
 
-  // Double click closes Room Polygon
+  // Double click closes Room Polygon or finishes Wall chain
   const handleStageDblClick = (e) => {
     if (currentTool === 'room' && currentRoomPts.length >= 6) {
       finishRoomDrawing();
+    } else if (currentTool === 'wall') {
+      setCurrentWallPts([]);
     }
   };
 
   // Select handlers
+  const handleWallClick = (e, wallId) => {
+    if (currentTool === 'door') {
+      const wall = walls.find((w) => w.id === wallId);
+      if (wall) {
+        const stage = e.target.getStage();
+        const pointerPosition = stage?.getPointerPosition();
+        if (pointerPosition) {
+          const rawX = (pointerPosition.x - stage.x()) / stage.scaleX();
+          const rawY = (pointerPosition.y - stage.y()) / stage.scaleY();
+          const dx = wall.x2 - wall.x1;
+          const dy = wall.y2 - wall.y1;
+          const lenSq = dx * dx + dy * dy;
+          if (lenSq > 4) {
+            let t = ((rawX - wall.x1) * dx + (rawY - wall.y1) * dy) / lenSq;
+            t = Math.max(0.08, Math.min(0.92, t));
+            const projX = wall.x1 + t * dx;
+            const projY = wall.y1 + t * dy;
+            const defaultDoorWidth = Math.max(25, Math.round(pixelsPerMeter > 1 ? pixelsPerMeter * 0.9 : 40));
+            const newDoor = {
+              id: crypto.randomUUID(),
+              wall_id: wall.id,
+              position_along_wall: t,
+              width: defaultDoorWidth,
+              swing_direction: 'right_in',
+            };
+            onAddDoorWithSuggestion(newDoor, { x: projX, y: projY });
+            setDoorHoverPreview(null);
+            e.cancelBubble = true;
+            return;
+          }
+        }
+      }
+    }
+
+    e.cancelBubble = true;
+    if (currentTool === 'select' || (currentTool === 'wall' && currentWallPts.length === 0)) {
+      onSelect({
+        type: 'wall',
+        id: wallId,
+        isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
+      });
+      if (currentTool === 'wall' && onSwitchTool) {
+        onSwitchTool('select');
+      }
+    }
+  };
+
+  const handleWallDragEnd = (e, wallId) => {
+    const dx = e.target.x();
+    const dy = e.target.y();
+    e.target.position({ x: 0, y: 0 });
+
+    if (dx === 0 && dy === 0) return;
+
+    const updated = walls.map((w) => {
+      if (w.id === wallId) {
+        return {
+          ...w,
+          x1: w.x1 + dx,
+          y1: w.y1 + dy,
+          x2: w.x2 + dx,
+          y2: w.y2 + dy,
+        };
+      }
+      return w;
+    });
+    onWallsChange(updated);
+  };
+
+  const handleWallEndpointDrag = (e, wallId, endpoint) => {
+    e.cancelBubble = true;
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY, wallId);
+    e.target.x(snap.x);
+    e.target.y(snap.y);
+
+    const updated = walls.map((w) => {
+      if (w.id === wallId) {
+        return endpoint === 1
+          ? { ...w, x1: snap.x, y1: snap.y }
+          : { ...w, x2: snap.x, y2: snap.y };
+      }
+      return w;
+    });
+    onWallsChange(updated);
+  };
+
+  const handleDoorClick = (e, doorId) => {
+    e.cancelBubble = true;
+    if (currentTool === 'select' || currentTool === 'door') {
+      onSelect({
+        type: 'door',
+        id: doorId,
+        isMulti: Boolean(e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey),
+      });
+      if (currentTool === 'door' && onSwitchTool) {
+        onSwitchTool('select');
+      }
+    }
+  };
+
   const handleRoomClick = (e, roomId) => {
     e.cancelBubble = true;
-    // Allow selecting existing room in select tool OR in room tool if not actively placing points
     if (currentTool === 'select' || (currentTool === 'room' && currentRoomPts.length === 0)) {
       onSelect({
         type: 'room',
@@ -790,6 +1220,35 @@ export default function CanvasManager({
         </div>
       )}
 
+      {/* IN-PROGRESS WALL DRAWING BANNER */}
+      {currentWallPts.length > 0 && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-[#0e0e18]/95 border border-indigo-500/30 backdrop-blur-xl px-5 py-2.5 rounded-2xl shadow-2xl z-30 flex items-center gap-4 animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse" />
+            <span className="text-sm font-semibold text-white">
+              Drawing Wall Chain: Click next point, double-click or Esc to finish
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentWallPts([])}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
+            >
+              <Check size={14} /> Finish Wall Chain
+            </button>
+
+            <button
+              onClick={() => setCurrentWallPts([])}
+              className="bg-red-500/15 hover:bg-red-500/25 text-red-300 text-xs px-2.5 py-1.5 rounded-xl flex items-center gap-1 transition-all cursor-pointer border border-red-500/20"
+              title="Cancel drawing (Esc)"
+            >
+              <X size={13} /> Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* QUICK DELETE BADGE FOR SELECTED ROOM */}
       {selectedRoom && selectedRoomCenter && currentRoomPts.length === 0 && (
         <div
@@ -837,123 +1296,278 @@ export default function CanvasManager({
         <Layer>{renderGrid}</Layer>
 
         {/* 2. BLUEPRINT BACKGROUND LAYER */}
-        <Layer>
-          {image && <KonvaImage image={image} opacity={0.65} listening={false} />}
-        </Layer>
+        {layers.blueprint !== false && (
+          <Layer>
+            {image && <KonvaImage image={image} opacity={0.65} listening={false} />}
+          </Layer>
+        )}
 
         {/* 3. ROOMS LAYER */}
-        <Layer>
-          {rooms.map((room) => {
-            const style = THEME.rooms[room.category] || THEME.rooms.other;
-            const isSelected =
-              selection.id === room.id || selection.ids?.has(room.id);
-            const center =
-              room.shape_data?.length >= 6 ? getPolygonCenter(room.shape_data) : null;
+        {layers.rooms !== false && (
+          <Layer>
+            {rooms.map((room) => {
+              const style = THEME.rooms[room.category] || THEME.rooms.other;
+              const isSelected =
+                selection.id === room.id || selection.ids?.has(room.id);
+              const center =
+                room.shape_data?.length >= 6 ? getPolygonCenter(room.shape_data) : null;
 
-            return (
-              <Group
-                key={room.id}
-                draggable={currentTool === 'select'}
-                onClick={(e) => handleRoomClick(e, room.id)}
-                onTap={(e) => handleRoomClick(e, room.id)}
-                onDragMove={(e) => handleRoomDragMove(e, room.id)}
-                onDragEnd={(e) => handleRoomDragEnd(e, room.id)}
-              >
+              return (
+                <Group
+                  key={room.id}
+                  draggable={currentTool === 'select'}
+                  onClick={(e) => handleRoomClick(e, room.id)}
+                  onTap={(e) => handleRoomClick(e, room.id)}
+                  onDragMove={(e) => handleRoomDragMove(e, room.id)}
+                  onDragEnd={(e) => handleRoomDragEnd(e, room.id)}
+                >
+                  <Line
+                    points={room.shape_data}
+                    fill={room.color || style.fill}
+                    stroke={isSelected ? '#2563EB' : style.stroke}
+                    strokeWidth={(isSelected ? 3.5 : 2) / scale}
+                    closed
+                    opacity={0.92}
+                    dash={isSelected ? [8 / scale, 4 / scale] : undefined}
+                    hitStrokeWidth={14 / scale}
+                    shadowColor={isSelected ? '#3B82F6' : undefined}
+                    shadowBlur={isSelected ? 12 : 0}
+                    shadowOpacity={0.7}
+                  />
+                  {center && (
+                    <Text
+                      x={center.x}
+                      y={center.y}
+                      text={room.name}
+                      fontSize={13 / scale}
+                      fill="#1F2937"
+                      align="center"
+                      offsetX={(room.name.length * 3.6) / scale}
+                      offsetY={7 / scale}
+                      fontFamily="Inter, sans-serif"
+                      fontStyle="600"
+                      listening={false}
+                    />
+                  )}
+                </Group>
+              );
+            })}
+
+            {/* Active Room Drawing Line */}
+            {currentRoomPts.length > 0 && (
+              <Group>
                 <Line
-                  points={room.shape_data}
-                  fill={room.color || style.fill}
-                  stroke={isSelected ? '#2563EB' : style.stroke}
-                  strokeWidth={(isSelected ? 3.5 : 2) / scale}
-                  closed
-                  opacity={0.92}
-                  dash={isSelected ? [8 / scale, 4 / scale] : undefined}
-                  hitStrokeWidth={14 / scale}
-                  shadowColor={isSelected ? '#3B82F6' : undefined}
-                  shadowBlur={isSelected ? 12 : 0}
-                  shadowOpacity={0.7}
+                  points={currentRoomPts}
+                  stroke="#2563EB"
+                  strokeWidth={3 / scale}
+                  dash={[8 / scale, 4 / scale]}
+                  closed={false}
                 />
-                {center && (
+                {/* Dynamic rubberband line to cursor */}
+                <Line
+                  points={[
+                    currentRoomPts[currentRoomPts.length - 2],
+                    currentRoomPts[currentRoomPts.length - 1],
+                    mousePos.x,
+                    mousePos.y,
+                  ]}
+                  stroke="#3B82F6"
+                  strokeWidth={2 / scale}
+                  dash={[4 / scale, 4 / scale]}
+                  opacity={0.8}
+                  listening={false}
+                />
+                {/* Pulsating Start Point Circle (Click to close) */}
+                <Circle
+                  x={currentRoomPts[0]}
+                  y={currentRoomPts[1]}
+                  radius={8 / scale}
+                  fill="#2563EB"
+                  stroke="#FFFFFF"
+                  strokeWidth={2 / scale}
+                  listening={false}
+                />
+                {currentRoomPts.length >= 6 && (
                   <Text
-                    x={center.x}
-                    y={center.y}
-                    text={room.name}
-                    fontSize={13 / scale}
-                    fill="#1F2937"
-                    align="center"
-                    offsetX={(room.name.length * 3.6) / scale}
-                    offsetY={7 / scale}
+                    x={currentRoomPts[0] + 12 / scale}
+                    y={currentRoomPts[1] - 8 / scale}
+                    text="Click to close"
+                    fontSize={11 / scale}
+                    fill="#1D4ED8"
+                    fontStyle="bold"
                     fontFamily="Inter, sans-serif"
-                    fontStyle="600"
                     listening={false}
                   />
                 )}
               </Group>
-            );
-          })}
+            )}
 
-          {/* Active Room Drawing Line */}
-          {currentRoomPts.length > 0 && (
-            <Group>
+            {/* Active Scale Line */}
+            {currentScalePts.length > 0 && (
               <Line
-                points={currentRoomPts}
-                stroke="#2563EB"
-                strokeWidth={3 / scale}
-                dash={[8 / scale, 4 / scale]}
+                points={currentScalePts}
+                stroke="#DC2626"
+                strokeWidth={4 / scale}
+                dash={[6 / scale, 4 / scale]}
                 closed={false}
               />
-              {/* Dynamic rubberband line to cursor */}
-              <Line
-                points={[
-                  currentRoomPts[currentRoomPts.length - 2],
-                  currentRoomPts[currentRoomPts.length - 1],
-                  mousePos.x,
-                  mousePos.y,
-                ]}
-                stroke="#3B82F6"
-                strokeWidth={2 / scale}
-                dash={[4 / scale, 4 / scale]}
-                opacity={0.8}
-                listening={false}
-              />
-              {/* Pulsating Start Point Circle (Click to close) */}
-              <Circle
-                x={currentRoomPts[0]}
-                y={currentRoomPts[1]}
-                radius={8 / scale}
-                fill="#2563EB"
-                stroke="#FFFFFF"
-                strokeWidth={2 / scale}
-                listening={false}
-              />
-              {currentRoomPts.length >= 6 && (
+            )}
+          </Layer>
+        )}
+
+        {/* 4. WALLS & DOORS LAYER */}
+        {layers.walls !== false && (
+          <Layer>
+            {/* Render Walls */}
+            {walls.map((wall) => {
+              const wallDoors = doors.filter((d) => d.wall_id === wall.id);
+              const segments = getWallSegmentsWithDoors(wall, wallDoors);
+              const isSelected =
+                selection.id === wall.id || selection.ids?.has(wall.id);
+              const thickness = wall.thickness || 12;
+
+              return (
+                <Group
+                  key={wall.id}
+                  draggable={currentTool === 'select'}
+                  onClick={(e) => handleWallClick(e, wall.id)}
+                  onTap={(e) => handleWallClick(e, wall.id)}
+                  onDragEnd={(e) => handleWallDragEnd(e, wall.id)}
+                >
+                  {/* Selection glow */}
+                  {isSelected && (
+                    <Line
+                      points={[wall.x1, wall.y1, wall.x2, wall.y2]}
+                      stroke="#3B82F6"
+                      strokeWidth={(thickness + 8) / scale}
+                      lineCap="round"
+                      opacity={0.35}
+                      listening={false}
+                    />
+                  )}
+
+                  {/* Solid Wall Segments (with gaps cut for doors) */}
+                  {segments.map((seg, sIdx) => (
+                    <Line
+                      key={`w-${wall.id}-seg-${sIdx}`}
+                      points={[seg.x1, seg.y1, seg.x2, seg.y2]}
+                      stroke={isSelected ? '#2563EB' : '#1E293B'}
+                      strokeWidth={thickness}
+                      lineCap="butt"
+                      hitStrokeWidth={Math.max(16, thickness + 10 / scale)}
+                    />
+                  ))}
+
+                  {/* Endpoint drag handles when single-selected */}
+                  {isSelected && (!selection.ids || selection.ids.size <= 1) && currentTool === 'select' && (
+                    <>
+                      <Circle
+                        x={wall.x1}
+                        y={wall.y1}
+                        radius={7 / scale}
+                        fill="#3B82F6"
+                        stroke="#FFFFFF"
+                        strokeWidth={2 / scale}
+                        draggable
+                        onDragMove={(e) => handleWallEndpointDrag(e, wall.id, 1)}
+                      />
+                      <Circle
+                        x={wall.x2}
+                        y={wall.y2}
+                        radius={7 / scale}
+                        fill="#3B82F6"
+                        stroke="#FFFFFF"
+                        strokeWidth={2 / scale}
+                        draggable
+                        onDragMove={(e) => handleWallEndpointDrag(e, wall.id, 2)}
+                      />
+                    </>
+                  )}
+                </Group>
+              );
+            })}
+
+            {/* Render Doors */}
+            {doors.map((door) => {
+              const wall = walls.find((w) => w.id === door.wall_id);
+              if (!wall) return null;
+              const isSelected =
+                selection.id === door.id || selection.ids?.has(door.id);
+              return renderDoorSymbol(door, wall, scale, isSelected, (e) =>
+                handleDoorClick(e, door.id)
+              );
+            })}
+
+            {/* Door Hover Placement Preview */}
+            {currentTool === 'door' && doorHoverPreview && (
+              <Group listening={false} opacity={0.75}>
+                <Circle
+                  x={doorHoverPreview.x}
+                  y={doorHoverPreview.y}
+                  radius={6 / scale}
+                  fill="#10B981"
+                  stroke="#FFFFFF"
+                  strokeWidth={1.5 / scale}
+                />
                 <Text
-                  x={currentRoomPts[0] + 12 / scale}
-                  y={currentRoomPts[1] - 8 / scale}
-                  text="Click to close"
+                  x={doorHoverPreview.x + 10 / scale}
+                  y={doorHoverPreview.y - 10 / scale}
+                  text="Click to place door"
                   fontSize={11 / scale}
-                  fill="#1D4ED8"
+                  fill="#059669"
                   fontStyle="bold"
                   fontFamily="Inter, sans-serif"
-                  listening={false}
                 />
-              )}
-            </Group>
-          )}
+              </Group>
+            )}
 
-          {/* Active Scale Line */}
-          {currentScalePts.length > 0 && (
-            <Line
-              points={currentScalePts}
-              stroke="#DC2626"
-              strokeWidth={4 / scale}
-              dash={[6 / scale, 4 / scale]}
-              closed={false}
-            />
-          )}
-        </Layer>
+            {/* In-progress Wall Chaining preview & rubberband */}
+            {currentWallPts.length >= 2 && currentTool === 'wall' && (
+              <Group listening={false}>
+                {/* Rubberband to mouse position */}
+                <Line
+                  points={[
+                    currentWallPts[0],
+                    currentWallPts[1],
+                    mousePos.x,
+                    mousePos.y,
+                  ]}
+                  stroke="#3B82F6"
+                  strokeWidth={Math.max(6, Math.round(pixelsPerMeter > 1 ? pixelsPerMeter * 0.12 : 12))}
+                  dash={[6 / scale, 4 / scale]}
+                  opacity={0.85}
+                />
+                {/* Start Point Pin */}
+                <Circle
+                  x={currentWallPts[0]}
+                  y={currentWallPts[1]}
+                  radius={6 / scale}
+                  fill="#2563EB"
+                  stroke="#FFFFFF"
+                  strokeWidth={2 / scale}
+                />
+              </Group>
+            )}
 
-        {/* 4. GRAPH LAYER (Edges & Nodes) */}
-        <Layer>
+            {/* Snapping indicator when hovering near a corner/node */}
+            {currentTool === 'wall' && mousePos.snapped && (
+              <Group listening={false}>
+                <Circle
+                  x={mousePos.x}
+                  y={mousePos.y}
+                  radius={7 / scale}
+                  fill="rgba(16, 185, 129, 0.35)"
+                  stroke="#10B981"
+                  strokeWidth={2 / scale}
+                />
+              </Group>
+            )}
+          </Layer>
+        )}
+
+        {/* 5. GRAPH LAYER (Edges & Nodes) */}
+        {layers.graph !== false && (
+          <Layer>
           {/* Edges */}
           {edges.map((edge) => {
             const n1 = nodes.find((n) => n.id === edge.from_node);
@@ -1066,6 +1680,7 @@ export default function CanvasManager({
             );
           })}
         </Layer>
+      )}
 
         {/* 5. SMART ALIGNMENT GUIDES LAYER */}
         <Layer listening={false}>

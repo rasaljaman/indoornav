@@ -1,5 +1,8 @@
+import { useState } from 'react';
 import {
   MousePointer2,
+  BrickWall,
+  DoorOpen,
   Square,
   Circle,
   TrendingUp,
@@ -11,6 +14,9 @@ import {
   Redo2,
   Grid3X3,
   Magnet,
+  Layers,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 const NODE_TYPES = [
@@ -41,9 +47,15 @@ export default function MapToolbar({
   snapEnabled = true,
   onToggleSnap,
   hasUnsavedChanges = false,
+  layers = { walls: true, rooms: true, graph: true, blueprint: true },
+  onToggleLayer,
 }) {
+  const [showLayersMenu, setShowLayersMenu] = useState(false);
+
   const tools = [
     { id: 'select', icon: MousePointer2, label: 'Select / Pan (V)' },
+    { id: 'wall', icon: BrickWall, label: 'Draw Wall (W)' },
+    { id: 'door', icon: DoorOpen, label: 'Place Door (D)' },
     { id: 'room', icon: Square, label: 'Draw Room (R)' },
     { id: 'node', icon: Circle, label: 'Add Node (N)' },
     { id: 'edge', icon: TrendingUp, label: 'Draw Path (P)' },
@@ -195,6 +207,59 @@ export default function MapToolbar({
 
       <div className="h-px bg-white/10 my-1" />
 
+      {/* Layers Visibility Popover */}
+      <div className="relative">
+        <button
+          onClick={() => setShowLayersMenu(!showLayersMenu)}
+          className={`p-3 rounded-xl transition-all duration-200 group relative flex justify-center items-center w-full ${
+            showLayersMenu
+              ? 'bg-blue-600/30 text-blue-400 border border-blue-500/30'
+              : 'text-gray-400 hover:bg-white/10 hover:text-white'
+          }`}
+          title="Layer Visibility"
+        >
+          <Layers size={18} />
+          <span className="absolute left-full ml-4 px-2 py-1 bg-gray-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none transition-opacity z-50">
+            Layers Toggle
+          </span>
+        </button>
+
+        {showLayersMenu && (
+          <div className="absolute left-full ml-3 top-0 bg-[#0d0d14]/95 border border-white/15 backdrop-blur-2xl rounded-2xl p-2.5 shadow-2xl min-w-[170px] z-50 flex flex-col gap-1.5 animate-fadeIn">
+            <div className="text-[0.72rem] font-semibold text-gray-400 px-2 py-1 border-b border-white/10 uppercase tracking-wider">
+              Canvas Layers
+            </div>
+
+            {[
+              { id: 'walls', label: 'Walls' },
+              { id: 'rooms', label: 'Rooms' },
+              { id: 'graph', label: 'Corridor Graph' },
+              { id: 'blueprint', label: 'Blueprint' },
+            ].map((layer) => {
+              const isVisible = layers[layer.id] !== false;
+              return (
+                <button
+                  key={layer.id}
+                  onClick={() => onToggleLayer && onToggleLayer(layer.id)}
+                  className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                    isVisible
+                      ? 'bg-white/10 text-white font-medium'
+                      : 'text-gray-500 hover:bg-white/5'
+                  }`}
+                >
+                  <span>{layer.label}</span>
+                  {isVisible ? (
+                    <Eye size={14} className="text-blue-400" />
+                  ) : (
+                    <EyeOff size={14} className="text-gray-600" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Blueprint Upload */}
       <button
         onClick={onUploadPlan}
@@ -208,6 +273,8 @@ export default function MapToolbar({
 
       {/* Save Button with Unsaved Indicator */}
       <button
+        id="save-map-button"
+        data-testid="save-map-button"
         onClick={onSave}
         className={`p-3 rounded-xl transition-all duration-200 group relative flex justify-center items-center ${
           hasUnsavedChanges
