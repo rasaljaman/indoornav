@@ -93,6 +93,7 @@ export default function MapEditor() {
 
   // Unified Selection State: { type: 'room' | 'node' | 'edge' | null, id: string | null, ids: Set }
   const [selection, setSelection] = useState({ type: null, id: null, ids: new Set() });
+  const [liveReshapingRoom, setLiveReshapingRoom] = useState(null);
   const handleSaveRef = useRef(null);
 
   // Load Floor & Map Data from Supabase
@@ -855,12 +856,13 @@ export default function MapEditor() {
         gridVisible={gridVisible}
         gridSize={gridSize}
         snapEnabled={snapEnabled}
+        onRoomLiveUpdate={setLiveReshapingRoom}
       />
 
       {/* Unified Element Properties Inspector Panel */}
       <ElementPropertiesPanel
         selection={selection}
-        rooms={rooms}
+        rooms={liveReshapingRoom ? rooms.map((r) => (r.id === liveReshapingRoom.id ? { ...r, shape_data: liveReshapingRoom.shape_data } : r)) : rooms}
         nodes={nodes}
         edges={edges}
         qrPoints={qrPoints}

@@ -190,6 +190,7 @@ export default function CanvasManager({
   gridVisible = true,
   gridSize = 20,
   snapEnabled = true,
+  onRoomLiveUpdate,
 }) {
   const stageRef = useRef(null);
   const containerRef = useRef(null);
@@ -1193,6 +1194,7 @@ export default function CanvasManager({
     newPts[vertexIdx * 2 + 1] = snap.y;
 
     setReshapingRoom({ id: roomId, shape_data: newPts });
+    if (onRoomLiveUpdate) onRoomLiveUpdate({ id: roomId, shape_data: newPts });
   };
 
   const handleRoomVertexDragEnd = (e, roomId, vertexIdx) => {
@@ -1210,6 +1212,7 @@ export default function CanvasManager({
     finalPts[vertexIdx * 2 + 1] = snap.y;
 
     setReshapingRoom(null);
+    if (onRoomLiveUpdate) onRoomLiveUpdate(null);
 
     const updatedRooms = rooms.map((r) =>
       r.id === roomId ? { ...r, shape_data: finalPts } : r
