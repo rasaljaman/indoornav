@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Shape, Arc } from 'react-konva';
+import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Shape, Arc, Rect } from 'react-konva';
 import { Maximize2, ZoomIn, ZoomOut, RotateCcw, Check, Undo2, X, Trash2 } from 'lucide-react';
 
 // Node type visual config
@@ -240,6 +240,12 @@ export default function CanvasManager({
   const [currentScalePts, setCurrentScalePts] = useState([]);
   const [edgeStartNodeId, setEdgeStartNodeId] = useState(null);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  // Room Vertex Reshaping & Quick Rectangle Drag States
+  const [reshapingRoom, setReshapingRoom] = useState(null); // { id, shape_data }
+  const [boxDragStart, setBoxDragStart] = useState(null);
+  const [boxPreview, setBoxPreview] = useState(null);
+  const isDraggingBoxRef = useRef(false);
 
   // Smart Alignment Guides State
   const [activeGuides, setActiveGuides] = useState([]);
@@ -525,6 +531,19 @@ export default function CanvasManager({
     const btn = e?.evt ? e.evt.button : e?.button;
     if (btn === 1) {
       setIsMiddleMouseDown(true);
+      return;
+    }
+    // Quick Rectangle Drag Start in Room Mode
+    if (currentTool === 'room' && currentRoomPts.length === 0 && (btn === 0 || btn === undefined)) {
+      const stage = stageRef.current;
+      const ptr = stage?.getPointerPosition();
+      if (ptr) {
+        const rawX = (ptr.x - stage.x()) / stage.scaleX();
+        const rawY = (ptr.y - stage.y()) / stage.scaleY();
+        const snap = snapPointToElements(rawX, rawY);
+        setBoxDragStart({ x: snap.x, y: snap.y });
+        isDraggingBoxRef.current = false;
+      }
     }
   };
 
@@ -533,6 +552,36 @@ export default function CanvasManager({
     if (btn === 1) {
       setIsMiddleMouseDown(false);
     }
+    // Quick Rectangle Drag Finish in Room Mode
+    if (currentTool === 'room' && boxPreview && isDraggingBoxRef.current) {
+      const w = Math.abs(boxPreview.x2 - boxPreview.x1);
+      const h = Math.abs(boxPreview.y2 - boxPreview.y1);
+      if (w >= 15 / scale && h >= 15 / scale) {
+        const minX = Math.min(boxPreview.x1, boxPreview.x2);
+        const maxX = Math.max(boxPreview.x1, boxPreview.x2);
+        const minY = Math.min(boxPreview.y1, boxPreview.y2);
+        const maxY = Math.max(boxPreview.y1, boxPreview.y2);
+
+        const newRoom = {
+          id: crypto.randomUUID(),
+          name: 'New Room',
+          category: 'other',
+          shape_data: [minX, minY, maxX, minY, maxX, maxY, minX, maxY],
+          color: null,
+        };
+        onRoomsChange([...rooms, newRoom]);
+        onSelect({ type: 'room', id: newRoom.id });
+        if (onSwitchTool) onSwitchTool('select');
+      }
+      setBoxDragStart(null);
+      setBoxPreview(null);
+      setTimeout(() => {
+        isDraggingBoxRef.current = false;
+      }, 80);
+      return;
+    }
+    setBoxDragStart(null);
+    setBoxPreview(null);
   };
 
   const handleMouseMove = (e) => {
@@ -543,6 +592,21 @@ export default function CanvasManager({
 
     const rawX = (pointerPosition.x - stage.x()) / stage.scaleX();
     const rawY = (pointerPosition.y - stage.y()) / stage.scaleY();
+
+    // Quick Rectangle Drag Move in Room Mode
+    if (currentTool === 'room' && boxDragStart && currentRoomPts.length === 0) {
+      const dist = Math.hypot(rawX - boxDragStart.x, rawY - boxDragStart.y);
+      if (dist > 8 / scale) {
+        isDraggingBoxRef.current = true;
+        const snap = snapPointToElements(rawX, rawY);
+        setBoxPreview({
+          x1: boxDragStart.x,
+          y1: boxDragStart.y,
+          x2: snap.x,
+          y2: snap.y,
+        });
+      }
+    }
 
     if (currentTool === 'wall') {
       const snap = snapPointToElements(rawX, rawY);
@@ -780,6 +844,10 @@ export default function CanvasManager({
     const y = snapCoord(rawY);
 
     if (currentTool === 'room') {
+      if (isDraggingBoxRef.current) {
+        isDraggingBoxRef.current = false;
+        return;
+      }
       if (currentRoomPts.length >= 6) {
         const startX = currentRoomPts[0];
         const startY = currentRoomPts[1];
@@ -790,6 +858,7 @@ export default function CanvasManager({
         }
       }
       setCurrentRoomPts([...currentRoomPts, x, y]);
+      return;
     } else if (currentTool === 'node') {
       const newNode = {
         id: crypto.randomUUID(),
@@ -1106,6 +1175,48 @@ export default function CanvasManager({
     onRoomsChange(updatedRooms);
   };
 
+  // Drag Individual Room Vertex (Reshaping)
+  const handleRoomVertexDragMove = (e, roomId, vertexIdx) => {
+    e.cancelBubble = true;
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room || !room.shape_data) return;
+
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY);
+    e.target.x(snap.x);
+    e.target.y(snap.y);
+
+    const basePts = (reshapingRoom && reshapingRoom.id === roomId ? reshapingRoom.shape_data : room.shape_data);
+    const newPts = [...basePts];
+    newPts[vertexIdx * 2] = snap.x;
+    newPts[vertexIdx * 2 + 1] = snap.y;
+
+    setReshapingRoom({ id: roomId, shape_data: newPts });
+  };
+
+  const handleRoomVertexDragEnd = (e, roomId, vertexIdx) => {
+    e.cancelBubble = true;
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room || !room.shape_data) return;
+
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY);
+
+    const basePts = (reshapingRoom && reshapingRoom.id === roomId ? reshapingRoom.shape_data : room.shape_data);
+    const finalPts = [...basePts];
+    finalPts[vertexIdx * 2] = snap.x;
+    finalPts[vertexIdx * 2 + 1] = snap.y;
+
+    setReshapingRoom(null);
+
+    const updatedRooms = rooms.map((r) =>
+      r.id === roomId ? { ...r, shape_data: finalPts } : r
+    );
+    onRoomsChange(updatedRooms);
+  };
+
   // Helper: polygon center
   function getPolygonCenter(pts) {
     let cx = 0, cy = 0;
@@ -1287,6 +1398,8 @@ export default function CanvasManager({
         width={dimensions.width}
         height={dimensions.height}
         onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
         onMouseMove={handleMouseMove}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -1316,49 +1429,100 @@ export default function CanvasManager({
               const style = THEME.rooms[room.category] || THEME.rooms.other;
               const isSelected =
                 selection.id === room.id || selection.ids?.has(room.id);
+              const shapeData =
+                reshapingRoom && reshapingRoom.id === room.id
+                  ? reshapingRoom.shape_data
+                  : room.shape_data;
               const center =
-                room.shape_data?.length >= 6 ? getPolygonCenter(room.shape_data) : null;
+                shapeData?.length >= 6 ? getPolygonCenter(shapeData) : null;
 
               return (
-                <Group
-                  key={room.id}
-                  draggable={currentTool === 'select'}
-                  onClick={(e) => handleRoomClick(e, room.id)}
-                  onTap={(e) => handleRoomClick(e, room.id)}
-                  onDragMove={(e) => handleRoomDragMove(e, room.id)}
-                  onDragEnd={(e) => handleRoomDragEnd(e, room.id)}
-                >
-                  <Line
-                    points={room.shape_data}
-                    fill={room.color || style.fill}
-                    stroke={isSelected ? '#2563EB' : style.stroke}
-                    strokeWidth={(isSelected ? 3.5 : 2) / scale}
-                    closed
-                    opacity={0.92}
-                    dash={isSelected ? [8 / scale, 4 / scale] : undefined}
-                    hitStrokeWidth={14 / scale}
-                    shadowColor={isSelected ? '#3B82F6' : undefined}
-                    shadowBlur={isSelected ? 12 : 0}
-                    shadowOpacity={0.7}
-                  />
-                  {center && (
-                    <Text
-                      x={center.x}
-                      y={center.y}
-                      text={room.name}
-                      fontSize={13 / scale}
-                      fill="#1F2937"
-                      align="center"
-                      offsetX={(room.name.length * 3.6) / scale}
-                      offsetY={7 / scale}
-                      fontFamily="Inter, sans-serif"
-                      fontStyle="600"
-                      listening={false}
+                <Group key={room.id}>
+                  {/* Draggable Room Body */}
+                  <Group
+                    draggable={currentTool === 'select'}
+                    onClick={(e) => handleRoomClick(e, room.id)}
+                    onTap={(e) => handleRoomClick(e, room.id)}
+                    onDragMove={(e) => handleRoomDragMove(e, room.id)}
+                    onDragEnd={(e) => handleRoomDragEnd(e, room.id)}
+                  >
+                    <Line
+                      points={shapeData}
+                      fill={room.color || style.fill}
+                      stroke={isSelected ? '#2563EB' : style.stroke}
+                      strokeWidth={(isSelected ? 3.5 : 2) / scale}
+                      closed
+                      opacity={0.92}
+                      dash={isSelected ? [8 / scale, 4 / scale] : undefined}
+                      hitStrokeWidth={14 / scale}
+                      shadowColor={isSelected ? '#3B82F6' : undefined}
+                      shadowBlur={isSelected ? 12 : 0}
+                      shadowOpacity={0.7}
                     />
+                    {center && (
+                      <Text
+                        x={center.x}
+                        y={center.y}
+                        text={room.name}
+                        fontSize={13 / scale}
+                        fill="#1F2937"
+                        align="center"
+                        offsetX={(room.name.length * 3.6) / scale}
+                        offsetY={7 / scale}
+                        fontFamily="Inter, sans-serif"
+                        fontStyle="600"
+                        listening={false}
+                      />
+                    )}
+                  </Group>
+
+                  {/* Vertex Reshaping Handles for Single Selected Room in Select Mode */}
+                  {isSelected && (!selection.ids || selection.ids.size <= 1) && currentTool === 'select' && shapeData && (
+                    <Group listening={true}>
+                      {Array.from({ length: shapeData.length / 2 }).map((_, vIdx) => (
+                        <Circle
+                          key={`room-${room.id}-v-${vIdx}`}
+                          x={shapeData[vIdx * 2]}
+                          y={shapeData[vIdx * 2 + 1]}
+                          radius={6.5 / scale}
+                          fill="#2563EB"
+                          stroke="#FFFFFF"
+                          strokeWidth={2 / scale}
+                          draggable
+                          onDragMove={(e) => handleRoomVertexDragMove(e, room.id, vIdx)}
+                          onDragEnd={(e) => handleRoomVertexDragEnd(e, room.id, vIdx)}
+                        />
+                      ))}
+                    </Group>
                   )}
                 </Group>
               );
             })}
+
+            {/* Quick Rectangle Click-Drag Preview */}
+            {boxPreview && currentTool === 'room' && (
+              <Group listening={false}>
+                <Rect
+                  x={Math.min(boxPreview.x1, boxPreview.x2)}
+                  y={Math.min(boxPreview.y1, boxPreview.y2)}
+                  width={Math.abs(boxPreview.x2 - boxPreview.x1)}
+                  height={Math.abs(boxPreview.y2 - boxPreview.y1)}
+                  fill="rgba(59, 130, 246, 0.22)"
+                  stroke="#2563EB"
+                  strokeWidth={2.5 / scale}
+                  dash={[6 / scale, 4 / scale]}
+                />
+                <Text
+                  x={Math.min(boxPreview.x1, boxPreview.x2) + 8 / scale}
+                  y={Math.min(boxPreview.y1, boxPreview.y2) + 8 / scale}
+                  text={`${Math.round((Math.abs(boxPreview.x2 - boxPreview.x1) / (pixelsPerMeter > 1 ? pixelsPerMeter : 1)) * 10) / 10}m × ${Math.round((Math.abs(boxPreview.y2 - boxPreview.y1) / (pixelsPerMeter > 1 ? pixelsPerMeter : 1)) * 10) / 10}m`}
+                  fontSize={12 / scale}
+                  fill="#1D4ED8"
+                  fontStyle="bold"
+                  fontFamily="Inter, sans-serif"
+                />
+              </Group>
+            )}
 
             {/* Active Room Drawing Line */}
             {currentRoomPts.length > 0 && (

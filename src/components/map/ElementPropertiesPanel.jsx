@@ -3,6 +3,21 @@ import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers, BrickWall, DoorOp
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
+// Shoelace Formula (Gauss's Area Formula) for arbitrary 2D polygons
+function calculatePolygonArea(pts) {
+  if (!pts || pts.length < 6) return 0;
+  let area = 0;
+  const n = pts.length / 2;
+  for (let i = 0; i < n; i++) {
+    const x1 = pts[i * 2];
+    const y1 = pts[i * 2 + 1];
+    const x2 = pts[((i + 1) % n) * 2];
+    const y2 = pts[((i + 1) % n) * 2 + 1];
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area) / 2;
+}
+
 const NODE_TYPE_OPTIONS = [
   { id: 'junction', label: 'Junction (Corridor)' },
   { id: 'stairs', label: 'Stairs' },
@@ -268,6 +283,53 @@ export default function ElementPropertiesPanel({
             })}
           </div>
         </div>
+
+        {/* Real-World Area & Geometry */}
+        {(() => {
+          const pixelArea = calculatePolygonArea(room.shape_data);
+          const hasCalibratedScale = pixelsPerMeter && pixelsPerMeter > 1;
+          const realAreaM2 = hasCalibratedScale ? pixelArea / (pixelsPerMeter * pixelsPerMeter) : null;
+          const realAreaSqFt = realAreaM2 !== null ? realAreaM2 * 10.7639 : null;
+          const vertexCount = (room.shape_data?.length || 0) / 2;
+
+          return (
+            <div style={{ marginBottom: '16px' }}>
+              <label style={labelStyle}>Dimensions & Area</label>
+              <div
+                style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '0.78rem', color: '#9ca3af' }}>Floor Area:</span>
+                  <span id="room-area-m2" style={{ fontSize: '1.05rem', fontWeight: 700, color: '#60a5fa' }}>
+                    {realAreaM2 !== null ? `${realAreaM2.toFixed(1)} m²` : `${Math.round(pixelArea)} px²`}
+                  </span>
+                </div>
+                {realAreaSqFt !== null && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#6b7280', marginBottom: '8px' }}>
+                    <span>Imperial:</span>
+                    <span>{realAreaSqFt.toFixed(1)} sq ft</span>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#9ca3af', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                  <span>Shape Vertices:</span>
+                  <span style={{ fontWeight: 600, color: '#e5e7eb' }}>
+                    {vertexCount} corners {vertexCount === 4 ? '(Rectangle)' : ''}
+                  </span>
+                </div>
+                {!hasCalibratedScale && (
+                  <div style={{ marginTop: '8px', fontSize: '0.7rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <span>⚠️ Calibrate floor scale to see real-world m²</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Color Override */}
         <div style={{ marginBottom: '20px' }}>
