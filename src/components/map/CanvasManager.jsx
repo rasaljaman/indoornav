@@ -247,6 +247,7 @@ export default function CanvasManager({
   const [boxDragStart, setBoxDragStart] = useState(null);
   const [boxPreview, setBoxPreview] = useState(null);
   const isDraggingBoxRef = useRef(false);
+  const [nodeSnapPreview, setNodeSnapPreview] = useState(null); // { x, y, type, label, snapped }
 
   // Smart Alignment Guides State
   const [activeGuides, setActiveGuides] = useState([]);
@@ -299,47 +300,63 @@ export default function CanvasManager({
     return Math.round(val / gridSize) * gridSize;
   }, [snapEnabled, gridSize]);
 
-  // Direct point snap to existing wall corners, room vertices, and nodes
+  // Direct point snap to existing door openings, wall corners, room vertices, and nodes
   const snapPointToElements = useCallback((rawX, rawY, excludeWallId = null) => {
-    const threshold = 14 / scale;
+    const threshold = 16 / scale;
 
-    // 1. Existing wall endpoints (highest priority for clean room corners)
-    for (const w of walls) {
-      if (w.id === excludeWallId) continue;
-      if (Math.hypot(rawX - w.x1, rawY - w.y1) <= threshold) {
-        return { x: w.x1, y: w.y1, snapped: true, type: 'wall_corner' };
-      }
-      if (Math.hypot(rawX - w.x2, rawY - w.y2) <= threshold) {
-        return { x: w.x2, y: w.y2, snapped: true, type: 'wall_corner' };
+    // 1. Door openings (highest priority for corridor connectivity)
+    for (const d of (doors || [])) {
+      const wall = (walls || []).find((w) => w.id === d.wall_id);
+      if (!wall) continue;
+      const dx = wall.x2 - wall.x1;
+      const dy = wall.y2 - wall.y1;
+      const t = d.position_along_wall || 0.5;
+      const doorX = wall.x1 + t * dx;
+      const doorY = wall.y1 + t * dy;
+      if (Math.hypot(rawX - doorX, rawY - doorY) <= threshold) {
+        return { x: doorX, y: doorY, snapped: true, type: 'door', label: 'Door Opening' };
       }
     }
 
-    // 2. Room vertices
-    for (const r of rooms) {
+    // 2. Existing wall endpoints (for clean room/corridor corners)
+    for (const w of (walls || [])) {
+      if (w.id === excludeWallId) continue;
+      if (Math.hypot(rawX - w.x1, rawY - w.y1) <= threshold) {
+        return { x: w.x1, y: w.y1, snapped: true, type: 'wall_corner', label: 'Wall Corner' };
+      }
+      if (Math.hypot(rawX - w.x2, rawY - w.y2) <= threshold) {
+        return { x: w.x2, y: w.y2, snapped: true, type: 'wall_corner', label: 'Wall Corner' };
+      }
+    }
+
+    // 3. Room vertices
+    for (const r of (rooms || [])) {
       if (!r.shape_data) continue;
       for (let i = 0; i < r.shape_data.length; i += 2) {
         const rx = r.shape_data[i];
         const ry = r.shape_data[i + 1];
         if (Math.hypot(rawX - rx, rawY - ry) <= threshold) {
-          return { x: rx, y: ry, snapped: true, type: 'room_vertex' };
+          return { x: rx, y: ry, snapped: true, type: 'room_vertex', label: 'Room Vertex' };
         }
       }
     }
 
-    // 3. Nodes
-    for (const n of nodes) {
+    // 4. Existing Nodes
+    for (const n of (nodes || [])) {
       if (Math.hypot(rawX - n.x, rawY - n.y) <= threshold) {
-        return { x: n.x, y: n.y, snapped: true, type: 'node' };
+        return { x: n.x, y: n.y, snapped: true, type: 'node', label: 'Node' };
       }
     }
 
-    // 4. Default grid snap
+    // 5. Default grid snap
     return {
       x: snapCoord(rawX),
       y: snapCoord(rawY),
       snapped: false,
+      type: 'grid',
+      label: 'Grid',
     };
-  }, [walls, rooms, nodes, scale, snapCoord]);
+  }, [walls, rooms, nodes, doors, scale, snapCoord]);
 
   // Compute Alignment Candidates
   const getAlignmentCandidates = useCallback((excludeId, excludeType) => {
@@ -654,7 +671,12 @@ export default function CanvasManager({
         setDoorHoverPreview(null);
       }
       setMousePos({ x: rawX, y: rawY });
+    } else if (currentTool === 'node') {
+      const snap = snapPointToElements(rawX, rawY);
+      setNodeSnapPreview(snap.snapped ? snap : null);
+      setMousePos({ x: snap.x, y: snap.y });
     } else {
+      if (nodeSnapPreview) setNodeSnapPreview(null);
       const x = snapCoord(rawX);
       const y = snapCoord(rawY);
       setMousePos({ x, y });
@@ -861,14 +883,18 @@ export default function CanvasManager({
       setCurrentRoomPts([...currentRoomPts, x, y]);
       return;
     } else if (currentTool === 'node') {
+      const snap = snapPointToElements(rawX, rawY);
+      const targetX = snap.x;
+      const targetY = snap.y;
       const newNode = {
         id: crypto.randomUUID(),
-        x,
-        y,
-        type: nodeType,
+        x: targetX,
+        y: targetY,
+        type: snap.type === 'door' ? 'room_door' : nodeType,
       };
       const updatedNodes = [...nodes, newNode];
       onNodesChange(updatedNodes);
+      setNodeSnapPreview(null);
     } else if (currentTool === 'scale') {
       const newPts = [...currentScalePts, x, y];
       if (newPts.length === 4) {
@@ -1030,11 +1056,15 @@ export default function CanvasManager({
               (edge.from_node === node.id && edge.to_node === edgeStartNodeId)
           );
           if (!exists) {
+            const startNode = nodes.find((n) => n.id === edgeStartNodeId);
+            const pDist = startNode ? Math.hypot(node.x - startNode.x, node.y - startNode.y) : 0;
+            const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
+            const realWeight = Math.round((pDist / ppm) * 100) / 100;
             const newEdge = {
               id: crypto.randomUUID(),
               from_node: edgeStartNodeId,
               to_node: node.id,
-              weight: 0,
+              weight: realWeight,
             };
             const updatedEdges = [...edges, newEdge];
             onEdgesChange(updatedEdges);
@@ -1073,26 +1103,31 @@ export default function CanvasManager({
 
   // Drag Node
   const handleNodeDragMove = (e, nodeId) => {
-    let targetX = snapCoord(e.target.x());
-    let targetY = snapCoord(e.target.y());
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY);
+    let targetX = snap.snapped ? snap.x : snapCoord(rawX);
+    let targetY = snap.snapped ? snap.y : snapCoord(rawY);
 
     const guides = [];
-    const threshold = 6 / scale;
-    const { xTargets, yTargets } = getAlignmentCandidates(nodeId, 'node');
+    if (!snap.snapped) {
+      const threshold = 6 / scale;
+      const { xTargets, yTargets } = getAlignmentCandidates(nodeId, 'node');
 
-    for (const cand of xTargets) {
-      if (Math.abs(targetX - cand.pos) <= threshold) {
-        targetX = cand.pos;
-        guides.push({ orientation: 'v', pos: cand.pos });
-        break;
+      for (const cand of xTargets) {
+        if (Math.abs(targetX - cand.pos) <= threshold) {
+          targetX = cand.pos;
+          guides.push({ orientation: 'v', pos: cand.pos });
+          break;
+        }
       }
-    }
 
-    for (const cand of yTargets) {
-      if (Math.abs(targetY - cand.pos) <= threshold) {
-        targetY = cand.pos;
-        guides.push({ orientation: 'h', pos: cand.pos });
-        break;
+      for (const cand of yTargets) {
+        if (Math.abs(targetY - cand.pos) <= threshold) {
+          targetY = cand.pos;
+          guides.push({ orientation: 'h', pos: cand.pos });
+          break;
+        }
       }
     }
 
@@ -1107,10 +1142,28 @@ export default function CanvasManager({
 
   const handleNodeDragEnd = (e, nodeId) => {
     setActiveGuides([]);
-    const targetX = e.target.x();
-    const targetY = e.target.y();
-    const updated = nodes.map((n) => (n.id === nodeId ? { ...n, x: targetX, y: targetY } : n));
-    onNodesChange(updated);
+    const rawX = e.target.x();
+    const rawY = e.target.y();
+    const snap = snapPointToElements(rawX, rawY);
+    const targetX = snap.snapped ? snap.x : snapCoord(rawX);
+    const targetY = snap.snapped ? snap.y : snapCoord(rawY);
+    const updatedNodes = nodes.map((n) => (n.id === nodeId ? { ...n, x: targetX, y: targetY } : n));
+    onNodesChange(updatedNodes);
+
+    // Update weights of connected edges in real-world meters
+    const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
+    const updatedEdges = edges.map((edge) => {
+      if (edge.from_node === nodeId || edge.to_node === nodeId) {
+        const otherId = edge.from_node === nodeId ? edge.to_node : edge.from_node;
+        const other = updatedNodes.find((n) => n.id === otherId);
+        if (other) {
+          const pDist = Math.hypot(other.x - targetX, other.y - targetY);
+          return { ...edge, weight: Math.round((pDist / ppm) * 100) / 100 };
+        }
+      }
+      return edge;
+    });
+    if (onEdgesChange) onEdgesChange(updatedEdges);
   };
 
   // Drag Room
@@ -1855,6 +1908,36 @@ export default function CanvasManager({
               </Group>
             );
           })}
+
+          {/* Node Placement Geometry Snap Indicator */}
+          {currentTool === 'node' && nodeSnapPreview && nodeSnapPreview.snapped && (
+            <Group x={nodeSnapPreview.x} y={nodeSnapPreview.y} listening={false}>
+              <Circle
+                radius={13 / scale}
+                stroke="#3B82F6"
+                strokeWidth={2 / scale}
+                dash={[4 / scale, 3 / scale]}
+                fill="rgba(59, 130, 246, 0.22)"
+              />
+              <Circle
+                radius={4.5 / scale}
+                fill="#2563EB"
+                stroke="#FFFFFF"
+                strokeWidth={1.5 / scale}
+              />
+              <Text
+                x={-60 / scale}
+                y={-22 / scale}
+                text={`Snap: ${nodeSnapPreview.label}`}
+                fontSize={10 / scale}
+                fill="#93C5FD"
+                fontStyle="bold"
+                fontFamily="Inter, sans-serif"
+                align="center"
+                width={120 / scale}
+              />
+            </Group>
+          )}
         </Layer>
       )}
 

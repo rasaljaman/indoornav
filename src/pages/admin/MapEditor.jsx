@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Loader2, ChevronDown, CheckCircle2 } from 'lucide-react';
+import { ArrowLeft, Loader2, ChevronDown, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import MapToolbar from '../../components/map/MapToolbar';
 import CanvasManager from '../../components/map/CanvasManager';
 import ElementPropertiesPanel from '../../components/map/ElementPropertiesPanel';
 import { ScaleCalibrationModal, BlueprintUploadModal } from '../../components/map/MapModals';
 import { useMapHistory } from '../../hooks/useMapHistory';
+import { validateGraph } from '../../lib/graphValidation';
 
 const INITIAL_STATE = {
   rooms: [],
@@ -56,6 +57,11 @@ export default function MapEditor() {
   // Floor picker state
   const [allFloors, setAllFloors] = useState([]);
   const [showFloorPicker, setShowFloorPicker] = useState(false);
+
+  // Graph Validation and Floor Connectors State
+  const [showValidationDrawer, setShowValidationDrawer] = useState(false);
+  const [floorConnectors, setFloorConnectors] = useState([]);
+  const [allBuildingNodes, setAllBuildingNodes] = useState([]);
 
   // Modals state
   const [calibrationPts, setCalibrationPts] = useState(null); // [x1, y1, x2, y2]
@@ -167,6 +173,21 @@ export default function MapEditor() {
           if (dd) doorsData = dd;
         }
 
+        // 6b. Load Floor Connectors and all building nodes
+        const { data: fcData } = await supabase
+          .from('floor_connectors')
+          .select('*');
+        setFloorConnectors(fcData || []);
+
+        if (floorsData && floorsData.length > 0) {
+          const allFloorIds = floorsData.map((f) => f.id);
+          const { data: bldgNodes } = await supabase
+            .from('nodes')
+            .select('id, floor_id, type, x, y')
+            .in('floor_id', allFloorIds);
+          setAllBuildingNodes(bldgNodes || []);
+        }
+
         // 7. Load Org Slug
         const { data: bldg } = await supabase
           .from('buildings')
@@ -216,6 +237,18 @@ export default function MapEditor() {
     const mapW = floorData.map_width || 1920;
     return mapW / floorData.real_width_m;
   }, [floorData]);
+
+  // Real-time Graph Validation
+  const graphValidation = useMemo(() => {
+    return validateGraph({
+      rooms,
+      nodes,
+      edges,
+      walls,
+      doors,
+      pixelsPerMeter,
+    });
+  }, [rooms, nodes, edges, walls, doors, pixelsPerMeter]);
 
   // Selection Handler
   const handleSelect = useCallback(({ type, id, isMulti = false }) => {
@@ -547,11 +580,53 @@ export default function MapEditor() {
         .eq('id', floorId);
 
       setFloorData((prev) => ({ ...prev, real_width_m: realWidth, real_height_m: realHeight }));
+
+      // Proportionally recalculate all edge weights to match new calibrated scale
+      pushState((prev) => {
+        const updatedEdges = prev.edges.map((e) => {
+          const n1 = prev.nodes.find((n) => n.id === e.from_node);
+          const n2 = prev.nodes.find((n) => n.id === e.to_node);
+          if (!n1 || !n2) return e;
+          const pDist = Math.hypot(n2.x - n1.x, n2.y - n1.y);
+          return { ...e, weight: Math.round((pDist / ppm) * 100) / 100 };
+        });
+        return { ...prev, edges: updatedEdges };
+      }, 'Recalibrate edge weights to new scale');
     } catch (err) {
       console.error('Error saving scale calibration:', err);
     } finally {
       setCalibrationPts(null);
       setCurrentTool('select');
+    }
+  };
+
+  // Multi-Floor Connector Handlers
+  const handleCreateConnector = async (nodeAId, nodeBId, type = 'stairs', weight = 30) => {
+    try {
+      const { data: newConn, error } = await supabase
+        .from('floor_connectors')
+        .insert([{ node_a: nodeAId, node_b: nodeBId, type, weight: parseFloat(weight) || 30 }])
+        .select()
+        .single();
+      if (error) throw error;
+      setFloorConnectors((prev) => [...prev, newConn]);
+    } catch (err) {
+      console.error('Failed to create floor connector:', err);
+      alert('Failed to link floors: ' + (err.message || 'Unknown error'));
+    }
+  };
+
+  const handleDeleteConnector = async (connectorId) => {
+    try {
+      const { error } = await supabase
+        .from('floor_connectors')
+        .delete()
+        .eq('id', connectorId);
+      if (error) throw error;
+      setFloorConnectors((prev) => prev.filter((c) => c.id !== connectorId));
+    } catch (err) {
+      console.error('Failed to delete floor connector:', err);
+      alert('Failed to remove floor connector: ' + (err.message || 'Unknown error'));
     }
   };
 
@@ -783,6 +858,90 @@ export default function MapEditor() {
             </button>
           )}
 
+          {/* Non-Blocking Graph Validation Badge & Drawer */}
+          <div className="relative pointer-events-auto">
+            <button
+              id="graph-validation-badge"
+              onClick={() => setShowValidationDrawer((prev) => !prev)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                graphValidation.warnings.length === 0
+                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25'
+                  : 'bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 shadow-lg shadow-amber-500/10'
+              }`}
+              title="Click to view corridor graph connectivity & reachability warnings"
+            >
+              {graphValidation.warnings.length === 0 ? (
+                <>
+                  <CheckCircle2 size={14} className="text-emerald-400" />
+                  <span>Graph Valid</span>
+                </>
+              ) : (
+                <>
+                  <AlertTriangle size={14} className="text-amber-400" />
+                  <span>{graphValidation.warnings.length} Graph Warning{graphValidation.warnings.length > 1 ? 's' : ''}</span>
+                </>
+              )}
+            </button>
+
+            {/* Validation Warnings Dropdown Panel */}
+            {showValidationDrawer && (
+              <div
+                id="graph-validation-drawer"
+                className="absolute top-full right-0 mt-2 bg-[#0e0e16]/95 border border-white/15 rounded-2xl p-3 min-w-[320px] max-w-[380px] z-50 backdrop-blur-2xl shadow-2xl pointer-events-auto"
+              >
+                <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                  <span className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+                    Graph Validation
+                  </span>
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full font-semibold ${
+                    graphValidation.warnings.length === 0
+                      ? 'bg-emerald-500/20 text-emerald-400'
+                      : 'bg-amber-500/20 text-amber-400'
+                  }`}>
+                    {graphValidation.warnings.length === 0 ? 'All Clear' : `${graphValidation.warnings.length} issue${graphValidation.warnings.length > 1 ? 's' : ''}`}
+                  </span>
+                </div>
+
+                {graphValidation.warnings.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-gray-400">
+                    <CheckCircle2 size={24} className="mx-auto text-emerald-400 mb-1.5" />
+                    All rooms are reachable and corridor graph is fully connected.
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+                    {graphValidation.warnings.map((w) => (
+                      <div
+                        key={w.id}
+                        className="p-2.5 rounded-xl bg-white/5 border border-white/8 hover:border-amber-500/40 transition-colors"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-300">
+                            <AlertTriangle size={13} className="shrink-0" />
+                            <span>{w.title}</span>
+                          </div>
+                          {w.elementId && (
+                            <button
+                              onClick={() => {
+                                handleSelect({ type: w.elementType || 'room', id: w.elementId });
+                                setShowValidationDrawer(false);
+                              }}
+                              className="text-[10px] px-2 py-0.5 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-500/30 cursor-pointer font-medium"
+                            >
+                              Focus
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-gray-400 mt-1 leading-relaxed">
+                          {w.message}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => navigate(`/admin/buildings/${buildingId}/floors/${floorId}/print-qrs`)}
             className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-xl font-medium transition-colors cursor-pointer"
@@ -869,6 +1028,12 @@ export default function MapEditor() {
         walls={walls}
         doors={doors}
         pixelsPerMeter={pixelsPerMeter}
+        allFloors={allFloors}
+        allBuildingNodes={allBuildingNodes}
+        floorConnectors={floorConnectors}
+        currentFloorId={floorId}
+        onCreateConnector={handleCreateConnector}
+        onDeleteConnector={handleDeleteConnector}
         onUpdateRoom={(updatedRoom) => {
           pushState((prev) => ({
             ...prev,

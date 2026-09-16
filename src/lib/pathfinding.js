@@ -1,12 +1,24 @@
-// A* Pathfinding Algorithm
-
 /**
- * Calculates Euclidean distance between two nodes
+ * Calculates Euclidean distance between two nodes in real-world meters
  */
-function heuristic(nodeA, nodeB) {
+function heuristic(nodeA, nodeB, pixelsPerMeter = 1) {
   const dx = nodeA.x - nodeB.x;
   const dy = nodeA.y - nodeB.y;
-  return Math.sqrt(dx * dx + dy * dy);
+  const pixelDist = Math.sqrt(dx * dx + dy * dy);
+  const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
+  return pixelDist / ppm;
+}
+
+/**
+ * Computes the real-world distance between two nodes in meters
+ */
+export function computeEdgeDistance(nodeA, nodeB, pixelsPerMeter = 1) {
+  if (!nodeA || !nodeB) return 0;
+  const dx = nodeA.x - nodeB.x;
+  const dy = nodeA.y - nodeB.y;
+  const pixelDist = Math.sqrt(dx * dx + dy * dy);
+  const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
+  return Math.round((pixelDist / ppm) * 100) / 100;
 }
 
 /**
@@ -15,27 +27,43 @@ function heuristic(nodeA, nodeB) {
  * @param {string} endId - The ID of the destination node
  * @param {Array} nodes - Array of node objects: {id, x, y, ...}
  * @param {Array} edges - Array of edge objects: {from_node, to_node, weight}
+ * @param {number} pixelsPerMeter - Scale calibration factor (pixels per meter)
  * @returns {Array} Array of node IDs representing the path, or null if no path found
  */
-export function findShortestPath(startId, endId, nodes, edges) {
+export function findShortestPath(startId, endId, nodes, edges, pixelsPerMeter = 1) {
   if (!startId || !endId || !nodes || !edges) return null;
+
+  const nodesMap = new Map(nodes.map(n => [n.id, n]));
+  const endNode = nodesMap.get(endId);
+  const startNode = nodesMap.get(startId);
+  
+  if (!endNode || !startNode) return null;
+
+  const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
 
   // 1. Build adjacency list for quick neighbor lookup
   const adjList = {};
   nodes.forEach(n => adjList[n.id] = []);
   
   edges.forEach(e => {
+    // Determine real-meter weight
+    let w = parseFloat(e.weight);
+    if (!w || w <= 0) {
+      const n1 = nodesMap.get(e.from_node);
+      const n2 = nodesMap.get(e.to_node);
+      if (n1 && n2) {
+        w = computeEdgeDistance(n1, n2, ppm);
+      } else {
+        w = 1;
+      }
+    }
+
     // Undirected graph
     if (adjList[e.from_node] && adjList[e.to_node]) {
-      adjList[e.from_node].push({ target: e.to_node, weight: e.weight });
-      adjList[e.to_node].push({ target: e.from_node, weight: e.weight });
+      adjList[e.from_node].push({ target: e.to_node, weight: w });
+      adjList[e.to_node].push({ target: e.from_node, weight: w });
     }
   });
-
-  const nodesMap = new Map(nodes.map(n => [n.id, n]));
-  const endNode = nodesMap.get(endId);
-  
-  if (!endNode || !nodesMap.has(startId)) return null;
 
   // A* Initialization
   const openSet = new Set([startId]); // Nodes to evaluate
@@ -44,15 +72,15 @@ export function findShortestPath(startId, endId, nodes, edges) {
   // cameFrom[nodeId] = previousNodeId on cheapest path
   const cameFrom = {};
   
-  // gScore: cost from start to node
+  // gScore: cost from start to node in meters
   const gScore = {};
   nodes.forEach(n => gScore[n.id] = Infinity);
   gScore[startId] = 0;
   
-  // fScore: gScore + heuristic cost to goal
+  // fScore: gScore + heuristic cost to goal in meters
   const fScore = {};
   nodes.forEach(n => fScore[n.id] = Infinity);
-  fScore[startId] = heuristic(nodesMap.get(startId), endNode);
+  fScore[startId] = heuristic(startNode, endNode, ppm);
 
   while (openSet.size > 0) {
     // Find node in openSet with lowest fScore
@@ -95,7 +123,7 @@ export function findShortestPath(startId, endId, nodes, edges) {
       // This path is the best until now
       cameFrom[neighbor.target] = currentId;
       gScore[neighbor.target] = tentativeGScore;
-      fScore[neighbor.target] = gScore[neighbor.target] + heuristic(nodesMap.get(neighbor.target), endNode);
+      fScore[neighbor.target] = gScore[neighbor.target] + heuristic(nodesMap.get(neighbor.target), endNode, ppm);
     }
   }
 

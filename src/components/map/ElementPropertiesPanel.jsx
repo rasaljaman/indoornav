@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { CATEGORY_COLORS, CATEGORY_LABELS } from '../../lib/theme';
-import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers, BrickWall, DoorOpen } from 'lucide-react';
+import { Trash2, X, Move, Compass, Tag, Link2, QrCode, Layers, BrickWall, DoorOpen, ArrowUpDown } from 'lucide-react';
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
@@ -35,6 +36,12 @@ export default function ElementPropertiesPanel({
   walls = [],
   doors = [],
   pixelsPerMeter = 1,
+  allFloors = [],
+  allBuildingNodes = [],
+  floorConnectors = [],
+  currentFloorId,
+  onCreateConnector,
+  onDeleteConnector,
   onUpdateRoom,
   onDeleteRoom,
   onUpdateNode,
@@ -49,6 +56,10 @@ export default function ElementPropertiesPanel({
   onToggleQr,
   onClose,
 }) {
+  const [targetFloorId, setTargetFloorId] = useState('');
+  const [targetNodeId, setTargetNodeId] = useState('');
+  const [connectorWeight, setConnectorWeight] = useState(30);
+
   if (!selection || (!selection.id && (!selection.ids || selection.ids.size === 0))) {
     return null;
   }
@@ -478,6 +489,148 @@ export default function ElementPropertiesPanel({
           </button>
         </div>
 
+        {/* Multi-Floor Connector (for stairs, lift, ramp) */}
+        {['stairs', 'lift', 'ramp'].includes(node.type) && (
+          <div style={{ marginBottom: '20px', padding: '12px', background: 'rgba(59, 130, 246, 0.05)', borderRadius: '12px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '10px' }}>
+              <ArrowUpDown size={15} className="text-blue-400" />
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#93c5fd' }}>
+                Multi-Floor Connector
+              </span>
+            </div>
+
+            {/* Existing Active Cross-Floor Links */}
+            {(() => {
+              const activeLinks = (floorConnectors || []).filter(
+                (c) => c.node_a === node.id || c.node_b === node.id
+              );
+              return (
+                <div style={{ marginBottom: '12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginBottom: '6px' }}>Active Links:</div>
+                  {activeLinks.length === 0 ? (
+                    <div style={{ fontSize: '0.75rem', color: '#6b7280', fontStyle: 'italic' }}>
+                      No cross-floor connections linked yet.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      {activeLinks.map((conn) => {
+                        const otherNodeId = conn.node_a === node.id ? conn.node_b : conn.node_a;
+                        const otherNode = (allBuildingNodes || []).find((n) => n.id === otherNodeId);
+                        const otherFloor = (allFloors || []).find((f) => f.id === otherNode?.floor_id);
+                        return (
+                          <div
+                            key={conn.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '6px 8px',
+                              background: 'rgba(255,255,255,0.04)',
+                              borderRadius: '6px',
+                              border: '1px solid rgba(255,255,255,0.06)',
+                              fontSize: '0.75rem',
+                            }}
+                          >
+                            <div>
+                              <span style={{ color: '#60a5fa', fontWeight: 600 }}>
+                                {otherFloor ? `L${otherFloor.level} (${otherFloor.name})` : 'Other Floor'}
+                              </span>
+                              <span style={{ color: '#9ca3af', marginLeft: '6px' }}>
+                                • {conn.type || 'link'} ({conn.weight || 30}s)
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => onDeleteConnector && onDeleteConnector(conn.id)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#f87171',
+                                cursor: 'pointer',
+                                padding: '2px 4px',
+                              }}
+                              title="Unlink Connector"
+                            >
+                              <X size={13} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Create New Link */}
+            {allFloors && allFloors.filter((f) => f.id !== (currentFloorId || node.floor_id)).length > 0 && (
+              <div style={{ paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginBottom: '6px' }}>Link to Another Floor:</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '6px' }}>
+                  <select
+                    value={targetFloorId}
+                    onChange={(e) => {
+                      setTargetFloorId(e.target.value);
+                      setTargetNodeId('');
+                    }}
+                    style={{ ...selectStyle, padding: '6px 8px', fontSize: '0.75rem' }}
+                  >
+                    <option value="">Select Target Floor...</option>
+                    {allFloors
+                      .filter((f) => f.id !== (currentFloorId || node.floor_id))
+                      .map((f) => (
+                        <option key={f.id} value={f.id} style={{ background: '#181820', color: '#fff' }}>
+                          L{f.level} — {f.name}
+                        </option>
+                      ))}
+                  </select>
+
+                  {targetFloorId && (
+                    <select
+                      value={targetNodeId}
+                      onChange={(e) => setTargetNodeId(e.target.value)}
+                      style={{ ...selectStyle, padding: '6px 8px', fontSize: '0.75rem' }}
+                    >
+                      <option value="">Select Target Node...</option>
+                      {(allBuildingNodes || [])
+                        .filter((n) => n.floor_id === targetFloorId)
+                        .map((n) => (
+                          <option key={n.id} value={n.id} style={{ background: '#181820', color: '#fff' }}>
+                            {n.type} ({Math.round(n.x)}, {Math.round(n.y)})
+                          </option>
+                        ))}
+                    </select>
+                  )}
+
+                  {targetFloorId && targetNodeId && (
+                    <button
+                      onClick={() => {
+                        if (onCreateConnector) {
+                          onCreateConnector(node.id, targetNodeId, node.type, connectorWeight);
+                          setTargetFloorId('');
+                          setTargetNodeId('');
+                        }
+                      }}
+                      style={{
+                        padding: '6px 10px',
+                        background: 'rgba(59, 130, 246, 0.25)',
+                        border: '1px solid rgba(59, 130, 246, 0.4)',
+                        borderRadius: '6px',
+                        color: '#93c5fd',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        marginTop: '4px',
+                      }}
+                    >
+                      + Connect Floors
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Delete Node */}
         <button
           onClick={() => onDeleteNode(node.id)}
@@ -520,14 +673,19 @@ export default function ElementPropertiesPanel({
           </button>
         </div>
 
-        {/* Computed Distance */}
+        {/* Real-World Distance Readout & A* Pathfinding Confirmation */}
         <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(59, 130, 246, 0.08)', borderRadius: '10px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
-          <label style={{ ...labelStyle, color: '#93c5fd' }}>Computed Distance</label>
-          <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#60a5fa' }}>
+          <label style={{ ...labelStyle, color: '#93c5fd' }}>Real-World Distance</label>
+          <div id="edge-distance-m" style={{ fontSize: '1.25rem', fontWeight: 700, color: '#60a5fa' }}>
             {meterDist} <span style={{ fontSize: '0.85rem', fontWeight: 400, color: '#bfdbfe' }}>meters</span>
           </div>
           <div style={{ fontSize: '0.72rem', color: '#9ca3af', marginTop: '4px' }}>
             {Math.round(pixelDist)} canvas pixels ({pixelsPerMeter.toFixed(1)} px/m)
+          </div>
+          <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(59, 130, 246, 0.15)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '0.7rem', color: '#34d399', fontWeight: 600 }}>
+              ✓ Used by A* Pathfinding (Metric Weight: {edge.weight ? `${edge.weight}m` : `${meterDist}m`})
+            </span>
           </div>
         </div>
 
