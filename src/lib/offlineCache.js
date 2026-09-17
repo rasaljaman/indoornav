@@ -109,6 +109,8 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
 
   let floors = [];
   let rooms = [];
+  let walls = [];
+  let doors = [];
   let nodes = [];
   let edges = [];
   let qrPoints = [];
@@ -132,6 +134,24 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
         .select('*')
         .in('floor_id', floorIds);
       rooms = roomsData || [];
+
+      // 4b. Fetch all walls across floors
+      const { data: wallsData } = await supabase
+        .from('walls')
+        .select('*')
+        .in('floor_id', floorIds);
+      const wallsList = wallsData || [];
+      walls = wallsList;
+
+      // 4c. Fetch all doors for these walls
+      const wallIds = wallsList.map(w => w.id);
+      if (wallIds.length > 0) {
+        const { data: doorsData } = await supabase
+          .from('doors')
+          .select('*')
+          .in('wall_id', wallIds);
+        doors = doorsData || [];
+      }
 
       // 5. Fetch all nodes across floors
       const { data: nodesData } = await supabase
@@ -170,6 +190,8 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
     buildings: buildingList,
     floors,
     rooms,
+    walls,
+    doors,
     nodes,
     edges,
     qrPoints,
@@ -290,6 +312,9 @@ export function getFloorDataFromOrgData(orgData, floorId) {
 
   const floor = orgData.floors?.find(f => f.id === floorId) || null;
   const rooms = orgData.rooms?.filter(r => r.floor_id === floorId) || [];
+  const walls = orgData.walls?.filter(w => w.floor_id === floorId) || [];
+  const wallIds = new Set(walls.map(w => w.id));
+  const doors = orgData.doors?.filter(d => wallIds.has(d.wall_id)) || [];
   const nodes = orgData.nodes?.filter(n => n.floor_id === floorId) || [];
   const nodeIds = new Set(nodes.map(n => n.id));
   const edges = orgData.edges?.filter(e => nodeIds.has(e.from_node) && nodeIds.has(e.to_node)) || [];
@@ -297,6 +322,8 @@ export function getFloorDataFromOrgData(orgData, floorId) {
   return {
     floor,
     rooms,
+    walls,
+    doors,
     nodes,
     edges
   };

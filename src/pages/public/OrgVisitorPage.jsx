@@ -748,6 +748,8 @@ export default function OrgVisitorPage() {
 
             <VisitorMap 
               rooms={mapData.rooms}
+              walls={mapData.walls}
+              doors={mapData.doors}
               nodes={mapData.nodes}
               edges={mapData.edges}
               currentLocationNodeId={currentLocation?.id}

@@ -1,5 +1,55 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Group, Text, Wedge } from 'react-konva';
+import { getRoomCenter } from '../../lib/pathfinding';
+
+// Helper: Calculate solid wall sub-segments by cutting gaps for doors
+function getWallSegmentsWithDoors(wall, wallDoors) {
+  const dx = wall.x2 - wall.x1;
+  const dy = wall.y2 - wall.y1;
+  const len = Math.hypot(dx, dy);
+
+  if (!wallDoors || wallDoors.length === 0 || len < 5) {
+    return [{ x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 }];
+  }
+
+  const intervals = wallDoors
+    .map((d) => {
+      const halfT = (d.width || 40) / len / 2;
+      const t = d.position_along_wall || 0.5;
+      return {
+        start: Math.max(0, t - halfT),
+        end: Math.min(1, t + halfT),
+        door: d,
+      };
+    })
+    .sort((a, b) => a.start - b.start);
+
+  const segments = [];
+  let currentT = 0;
+
+  for (const iv of intervals) {
+    if (iv.start > currentT + 0.005) {
+      segments.push({
+        x1: wall.x1 + currentT * dx,
+        y1: wall.y1 + currentT * dy,
+        x2: wall.x1 + iv.start * dx,
+        y2: wall.y1 + iv.start * dy,
+      });
+    }
+    currentT = Math.max(currentT, iv.end);
+  }
+
+  if (currentT < 0.995) {
+    segments.push({
+      x1: wall.x1 + currentT * dx,
+      y1: wall.y1 + currentT * dy,
+      x2: wall.x2,
+      y2: wall.y2,
+    });
+  }
+
+  return segments;
+}
 
 // Google Maps Aesthetic Theme
 const THEME = {
@@ -31,15 +81,21 @@ const THEME = {
 export default function VisitorMap({
   blueprintUrl,
   rooms = [],
+  walls = [],
+  doors = [],
   nodes = [],
-  _edges = [],
+  edges = [],
   currentLocationNodeId = null,
   liveLocation = null, // { x, y, heading }
   path = [],
 }) {
   const stageRef = useRef(null);
+  const containerRef = useRef(null);
   const [image, setImage] = useState(null);
-  const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight - 300 });
+  const [dimensions, setDimensions] = useState({
+    width: typeof window !== 'undefined' ? window.innerWidth : 800,
+    height: typeof window !== 'undefined' ? Math.max(420, window.innerHeight - 260) : 500,
+  });
 
   // Viewport State
   const [scale, setScale] = useState(1);
@@ -57,10 +113,17 @@ export default function VisitorMap({
   // Resize listener
   useEffect(() => {
     function handleResize() {
-      setDimensions({
-        width: window.innerWidth,
-        height: window.innerHeight - 250
-      });
+      if (containerRef.current) {
+        setDimensions({
+          width: containerRef.current.offsetWidth || window.innerWidth,
+          height: containerRef.current.offsetHeight || Math.max(420, window.innerHeight - 260),
+        });
+      } else {
+        setDimensions({
+          width: window.innerWidth,
+          height: Math.max(420, window.innerHeight - 260),
+        });
+      }
     }
     window.addEventListener('resize', handleResize);
     handleResize();
@@ -155,40 +218,107 @@ export default function VisitorMap({
     return () => clearInterval(interval);
   }, []);
 
-  // Center map initially
+  // Calculate bounding box and fit map to viewport
+  const fitToContent = useCallback(() => {
+    const allX = [];
+    const allY = [];
+
+    rooms.forEach((r) => {
+      if (!r.shape_data) return;
+      if (typeof r.shape_data[0] === 'number') {
+        for (let i = 0; i < r.shape_data.length; i += 2) {
+          allX.push(r.shape_data[i]);
+          allY.push(r.shape_data[i + 1]);
+        }
+      } else if (Array.isArray(r.shape_data[0])) {
+        r.shape_data.forEach((pt) => {
+          allX.push(pt[0]);
+          allY.push(pt[1]);
+        });
+      }
+    });
+
+    nodes.forEach((n) => {
+      allX.push(n.x);
+      allY.push(n.y);
+    });
+
+    walls.forEach((w) => {
+      allX.push(w.x1, w.x2);
+      allY.push(w.y1, w.y2);
+    });
+
+    if (image) {
+      allX.push(0, image.width);
+      allY.push(0, image.height);
+    }
+
+    if (allX.length === 0) {
+      setScale(1);
+      setPosition({ x: 0, y: 0 });
+      return;
+    }
+
+    const minX = Math.min(...allX);
+    const maxX = Math.max(...allX);
+    const minY = Math.min(...allY);
+    const maxY = Math.max(...allY);
+
+    const padding = 50;
+    const contentW = Math.max(maxX - minX, 60);
+    const contentH = Math.max(maxY - minY, 60);
+
+    const fitScaleX = (dimensions.width - padding * 2) / contentW;
+    const fitScaleY = (dimensions.height - padding * 2) / contentH;
+    const fitScale = Math.min(Math.max(Math.min(fitScaleX, fitScaleY), 0.2), 3.0);
+
+    const contentCenterX = (minX + maxX) / 2;
+    const contentCenterY = (minY + maxY) / 2;
+
+    setScale(fitScale);
+    setPosition({
+      x: dimensions.width / 2 - contentCenterX * fitScale,
+      y: dimensions.height / 2 - contentCenterY * fitScale,
+    });
+  }, [rooms, nodes, walls, image, dimensions]);
+
+  // Center or fit map initially and on floor/route updates
   useEffect(() => {
-    if (nodes.length === 0 || !stageRef.current) return;
+    if (rooms.length === 0 && nodes.length === 0 && walls.length === 0 && !image) return;
 
-    let targetNode = null;
-    if (path.length > 0) {
-      targetNode = nodes.find(n => n.id === path[0]);
-    } else if (displayPos) {
-      targetNode = displayPos;
-    } else if (currentLocationNodeId) {
-      targetNode = nodes.find(n => n.id === currentLocationNodeId);
-    } else if (image) {
-      targetNode = { x: image.width / 2, y: image.height / 2 };
+    // If an active route path is present, focus on route start
+    if (path && path.length > 0) {
+      const nodesMap = new Map(nodes.map((n) => [n.id, n]));
+      const startNode = nodesMap.get(path[0]);
+      if (startNode) {
+        const defaultScale = 1.4;
+        setScale(defaultScale);
+        setPosition({
+          x: dimensions.width / 2 - startNode.x * defaultScale,
+          y: dimensions.height / 2 - startNode.y * defaultScale,
+        });
+        return;
+      }
     }
 
-    if (targetNode) {
-      const defaultScale = 1.5;
-      const targetX = (dimensions.width / 2) - (targetNode.x * defaultScale);
-      const targetY = (dimensions.height / 2) - (targetNode.y * defaultScale);
+    // Default: Fit all floor content into view
+    fitToContent();
+  }, [rooms, nodes, walls, image, path, fitToContent]);
 
-      setScale(defaultScale);
-      setPosition({ x: targetX, y: targetY });
-    }
-  }, [nodes.length, path.length === 0, currentLocationNodeId]);
-
-  // Recenter helper
+  // Recenter helper: focus on live user location or re-fit content
   const handleRecenter = useCallback(() => {
-    const target = displayPos || (currentLocationNodeId ? nodes.find(n => n.id === currentLocationNodeId) : null);
-    if (!target || !stageRef.current) return;
+    const target =
+      displayPos ||
+      (currentLocationNodeId ? nodes.find((n) => n.id === currentLocationNodeId) : null);
 
-    const targetX = (dimensions.width / 2) - (target.x * scale);
-    const targetY = (dimensions.height / 2) - (target.y * scale);
-    setPosition({ x: targetX, y: targetY });
-  }, [displayPos, currentLocationNodeId, nodes, dimensions, scale]);
+    if (target && stageRef.current) {
+      const targetX = dimensions.width / 2 - target.x * scale;
+      const targetY = dimensions.height / 2 - target.y * scale;
+      setPosition({ x: targetX, y: targetY });
+    } else {
+      fitToContent();
+    }
+  }, [displayPos, currentLocationNodeId, nodes, dimensions, scale, fitToContent]);
 
   // Handle Zoom
   const handleWheel = useCallback((e) => {
@@ -290,7 +420,7 @@ export default function VisitorMap({
   const wedgeRotation = displayPos ? (displayPos.heading - 120) : 0;
 
   return (
-    <div className="w-full rounded-2xl overflow-hidden shadow-2xl border border-white/10 relative" style={{ height: dimensions.height, background: THEME.background }}>
+    <div ref={containerRef} className="w-full rounded-2xl overflow-hidden shadow-2xl border border-white/10 relative" style={{ height: dimensions.height, background: THEME.background }}>
       <Stage
         ref={stageRef}
         width={dimensions.width}
@@ -314,40 +444,72 @@ export default function VisitorMap({
             />
           )}
 
+          {/* Walls */}
+          {walls && walls.length > 0 && (
+            <Group key="visitor-walls">
+              {walls.map((wall) => {
+                const wallDoors = (doors || []).filter((d) => d.wall_id === wall.id);
+                const segments = getWallSegmentsWithDoors(wall, wallDoors);
+                const thickness = Math.max(3, (wall.thickness || 12)) / scale;
+
+                return (
+                  <Group key={`vwall-${wall.id}`}>
+                    {segments.map((seg, sIdx) => (
+                      <Line
+                        key={`${wall.id}-seg-${sIdx}`}
+                        points={[seg.x1, seg.y1, seg.x2, seg.y2]}
+                        stroke="#1E293B"
+                        strokeWidth={thickness}
+                        lineCap="round"
+                        lineJoin="round"
+                        listening={false}
+                      />
+                    ))}
+                  </Group>
+                );
+              })}
+            </Group>
+          )}
+
           {/* Rooms */}
           {rooms.map((room) => {
             const style = THEME.rooms[room.category] || THEME.rooms.other;
-            const pts = room.shape_data ? room.shape_data.flat() : [];
-            
-            // Calculate label position
-            let centerX = 0, centerY = 0;
-            if (room.shape_data && room.shape_data.length > 0) {
-              const sum = room.shape_data.reduce((acc, pt) => [acc[0] + pt[0], acc[1] + pt[1]], [0, 0]);
-              centerX = sum[0] / room.shape_data.length;
-              centerY = sum[1] / room.shape_data.length;
-            }
+            const pts = room.shape_data
+              ? typeof room.shape_data[0] === 'number'
+                ? room.shape_data
+                : room.shape_data.flat()
+              : [];
+            const center = getRoomCenter(room);
+
+            // Responsive font sizing: scales naturally with zoom,
+            // clamped to 10.5px-15px equivalent screen size so it is always crisp, legible and never huge
+            const screenFontSize = Math.max(10.5, Math.min(15, 12 * Math.sqrt(scale)));
+            const canvasFontSize = screenFontSize / scale;
+            const labelWidth = Math.max(120 / scale, (room.name?.length || 0) * canvasFontSize * 0.75);
 
             return (
               <Group key={room.id}>
                 <Line
                   points={pts}
-                  fill={style.fill}
+                  fill={room.color || style.fill}
                   stroke={style.stroke}
                   strokeWidth={2 / scale}
                   closed
-                  opacity={0.85}
+                  opacity={0.88}
                   tension={0}
                 />
-                {room.name && (
+                {room.name && center && (
                   <Text
-                    x={centerX - (room.name.length * (3 / scale))}
-                    y={centerY - (6 / scale)}
-                    text={room.name}
-                    fontSize={12 / scale}
-                    fill="#3c4043"
-                    fontFamily="Inter, sans-serif"
-                    fontStyle="500"
+                    x={center.x - labelWidth / 2}
+                    y={center.y - canvasFontSize * 0.55}
+                    width={labelWidth}
                     align="center"
+                    verticalAlign="middle"
+                    text={room.name}
+                    fontSize={canvasFontSize}
+                    fill="#1F2937"
+                    fontFamily="Inter, sans-serif"
+                    fontStyle="600"
                     listening={false}
                   />
                 )}
