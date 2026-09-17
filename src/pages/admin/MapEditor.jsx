@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Loader2, ChevronDown, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Loader2, ChevronDown, CheckCircle2, AlertTriangle, Compass, Route, Footprints, ArrowRight, X } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import MapToolbar from '../../components/map/MapToolbar';
 import CanvasManager from '../../components/map/CanvasManager';
@@ -8,6 +8,7 @@ import ElementPropertiesPanel from '../../components/map/ElementPropertiesPanel'
 import { ScaleCalibrationModal, BlueprintUploadModal } from '../../components/map/MapModals';
 import { useMapHistory } from '../../hooks/useMapHistory';
 import { validateGraph } from '../../lib/graphValidation';
+import { findMultiFloorPath, findClosestNodeToRoom } from '../../lib/pathfinding';
 
 const INITIAL_STATE = {
   rooms: [],
@@ -62,6 +63,14 @@ export default function MapEditor() {
   const [showValidationDrawer, setShowValidationDrawer] = useState(false);
   const [floorConnectors, setFloorConnectors] = useState([]);
   const [allBuildingNodes, setAllBuildingNodes] = useState([]);
+  const [allBuildingRooms, setAllBuildingRooms] = useState([]);
+  const [allBuildingEdges, setAllBuildingEdges] = useState([]);
+
+  // Route Simulation / Pathfinding Verification State
+  const [showRouteModal, setShowRouteModal] = useState(false);
+  const [routeStart, setRouteStart] = useState({ floorId: '', type: 'room', id: '' });
+  const [routeEnd, setRouteEnd] = useState({ floorId: '', type: 'room', id: '' });
+  const [simulatedRoute, setSimulatedRoute] = useState(null);
 
   // Modals state
   const [calibrationPts, setCalibrationPts] = useState(null); // [x1, y1, x2, y2]
@@ -183,9 +192,24 @@ export default function MapEditor() {
           const allFloorIds = floorsData.map((f) => f.id);
           const { data: bldgNodes } = await supabase
             .from('nodes')
-            .select('id, floor_id, type, x, y')
+            .select('id, floor_id, type, x, y, label')
             .in('floor_id', allFloorIds);
           setAllBuildingNodes(bldgNodes || []);
+
+          const { data: bldgRooms } = await supabase
+            .from('rooms')
+            .select('id, floor_id, name, shape_data, category')
+            .in('floor_id', allFloorIds);
+          setAllBuildingRooms(bldgRooms || []);
+
+          if (bldgNodes && bldgNodes.length > 0) {
+            const bNodeIds = bldgNodes.map((n) => n.id);
+            const { data: bldgEdges } = await supabase
+              .from('edges')
+              .select('*')
+              .in('from_node', bNodeIds);
+            setAllBuildingEdges(bldgEdges || []);
+          }
         }
 
         // 7. Load Org Slug
@@ -630,6 +654,48 @@ export default function MapEditor() {
     }
   };
 
+  // Route Simulation / Pathfinding Computation
+  const handleComputeRoute = useCallback((s = routeStart, e = routeEnd) => {
+    if (!s || !e || !s.id || !e.id) return;
+
+    let startNodeId = s.id;
+    if (s.type === 'room') {
+      const room = allBuildingRooms.find((r) => r.id === s.id);
+      const flNodes = allBuildingNodes.filter((n) => n.floor_id === (s.floorId || floorId));
+      const closest = findClosestNodeToRoom(room, flNodes);
+      startNodeId = closest?.id;
+    }
+
+    let endNodeId = e.id;
+    if (e.type === 'room') {
+      const room = allBuildingRooms.find((r) => r.id === e.id);
+      const flNodes = allBuildingNodes.filter((n) => n.floor_id === (e.floorId || floorId));
+      const closest = findClosestNodeToRoom(room, flNodes);
+      endNodeId = closest?.id;
+    }
+
+    if (!startNodeId || !endNodeId) {
+      setSimulatedRoute({ error: 'Could not find connected corridor node for the selected room.' });
+      return;
+    }
+
+    const route = findMultiFloorPath({
+      startId: startNodeId,
+      endId: endNodeId,
+      nodes: allBuildingNodes,
+      edges: allBuildingEdges,
+      floorConnectors: floorConnectors,
+      floors: allFloors,
+      pixelsPerMeter: floorData?.pixels_per_meter || 86.0,
+    });
+
+    if (route) {
+      setSimulatedRoute(route);
+    } else {
+      setSimulatedRoute({ error: 'No walkable path found connecting these two locations.' });
+    }
+  }, [routeStart, routeEnd, allBuildingRooms, allBuildingNodes, allBuildingEdges, floorConnectors, allFloors, floorData, floorId]);
+
   // Blueprint Plan Upload Confirmed
   const handleConfirmBlueprint = (url) => {
     setBlueprintUrl(url);
@@ -942,6 +1008,36 @@ export default function MapEditor() {
             )}
           </div>
 
+          {/* Multi-Floor Route Simulation Button */}
+          <button
+            id="simulate-route-btn"
+            onClick={() => {
+              setShowRouteModal(!showRouteModal);
+              setShowValidationDrawer(false);
+              if (!simulatedRoute && allBuildingRooms.length > 0) {
+                const curFlId = floorId;
+                const otherFl = allFloors.find((f) => f.id !== curFlId);
+                const curRooms = allBuildingRooms.filter((r) => r.floor_id === curFlId);
+                const otherRooms = otherFl ? allBuildingRooms.filter((r) => r.floor_id === otherFl.id) : [];
+
+                const s = { floorId: curFlId, type: 'room', id: curRooms[0]?.id || '' };
+                const e = { floorId: otherFl?.id || curFlId, type: 'room', id: otherRooms[0]?.id || curRooms[1]?.id || '' };
+                setRouteStart(s);
+                setRouteEnd(e);
+                handleComputeRoute(s, e);
+              }
+            }}
+            className={`text-xs px-3 py-1.5 rounded-xl font-medium border flex items-center gap-1.5 transition-all cursor-pointer ${
+              showRouteModal || (simulatedRoute && !simulatedRoute.error)
+                ? 'bg-blue-600/30 border-blue-500/60 text-blue-300 shadow-lg shadow-blue-500/10'
+                : 'bg-white/5 hover:bg-white/10 border-white/10 text-gray-300'
+            }`}
+            title="Simulate and verify multi-floor pathfinding between rooms and nodes"
+          >
+            <Compass size={14} className={simulatedRoute && !simulatedRoute.error ? 'text-blue-400' : 'text-gray-400'} />
+            <span>{simulatedRoute && !simulatedRoute.error ? `Route: ${simulatedRoute.totalNodes} Nodes` : 'Simulate Route'}</span>
+          </button>
+
           <button
             onClick={() => navigate(`/admin/buildings/${buildingId}/floors/${floorId}/print-qrs`)}
             className="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-xl font-medium transition-colors cursor-pointer"
@@ -1016,6 +1112,7 @@ export default function MapEditor() {
         gridSize={gridSize}
         snapEnabled={snapEnabled}
         onRoomLiveUpdate={setLiveReshapingRoom}
+        routeHighlightNodeIds={simulatedRoute?.path || []}
       />
 
       {/* Unified Element Properties Inspector Panel */}
@@ -1135,6 +1232,225 @@ export default function MapEditor() {
           onConfirm={handleConfirmBlueprint}
           onCancel={() => setShowBlueprintModal(false)}
         />
+      )}
+
+      {/* Route Simulation / Multi-Floor Pathfinding Modal */}
+      {showRouteModal && (
+        <div id="route-simulation-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-[#0f172a] border border-blue-500/30 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[88vh]">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-white/5">
+              <div className="flex items-center gap-2.5">
+                <Compass className="w-5 h-5 text-blue-400" />
+                <h3 className="font-semibold text-white text-base">Multi-Floor Route Simulator</h3>
+              </div>
+              <button
+                onClick={() => setShowRouteModal(false)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Origin and Destination pickers */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Start Location Card */}
+                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-blue-400 uppercase tracking-wider">Start Origin</span>
+                    <span className="text-[11px] text-gray-400">Step 1</span>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-gray-400 block mb-1 font-medium">Floor</label>
+                    <select
+                      value={routeStart.floorId || floorId}
+                      onChange={(e) => {
+                        const newFl = e.target.value;
+                        const flRooms = allBuildingRooms.filter((r) => r.floor_id === newFl);
+                        const s = { floorId: newFl, type: 'room', id: flRooms[0]?.id || '' };
+                        setRouteStart(s);
+                        handleComputeRoute(s, routeEnd);
+                      }}
+                      className="w-full text-xs px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-blue-500"
+                    >
+                      {allFloors.map((f) => (
+                        <option key={f.id} value={f.id}>{f.name} (Level {f.level})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-gray-400 block mb-1 font-medium">Room</label>
+                    <select
+                      value={routeStart.id}
+                      onChange={(e) => {
+                        const s = { ...routeStart, id: e.target.value };
+                        setRouteStart(s);
+                        handleComputeRoute(s, routeEnd);
+                      }}
+                      className="w-full text-xs px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-blue-500"
+                    >
+                      <option value="">Select Starting Room...</option>
+                      {allBuildingRooms
+                        .filter((r) => r.floor_id === (routeStart.floorId || floorId))
+                        .map((r) => (
+                          <option key={r.id} value={r.id}>{r.name}</option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Destination Location Card */}
+                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Destination</span>
+                    <span className="text-[11px] text-gray-400">Final Target</span>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-gray-400 block mb-1 font-medium">Floor</label>
+                    <select
+                      value={routeEnd.floorId}
+                      onChange={(e) => {
+                        const newFl = e.target.value;
+                        const flRooms = allBuildingRooms.filter((r) => r.floor_id === newFl);
+                        const endObj = { floorId: newFl, type: 'room', id: flRooms[0]?.id || '' };
+                        setRouteEnd(endObj);
+                        handleComputeRoute(routeStart, endObj);
+                      }}
+                      className="w-full text-xs px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-blue-500"
+                    >
+                      {allFloors.map((f) => (
+                        <option key={f.id} value={f.id}>{f.name} (Level {f.level})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-gray-400 block mb-1 font-medium">Room</label>
+                    <select
+                      value={routeEnd.id}
+                      onChange={(e) => {
+                        const endObj = { ...routeEnd, id: e.target.value };
+                        setRouteEnd(endObj);
+                        handleComputeRoute(routeStart, endObj);
+                      }}
+                      className="w-full text-xs px-3 py-2 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-blue-500"
+                    >
+                      <option value="">Select Destination Room...</option>
+                      {allBuildingRooms
+                        .filter((r) => r.floor_id === routeEnd.floorId)
+                        .map((r) => (
+                          <option key={r.id} value={r.id}>{r.name}</option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Route Computation Results */}
+              {simulatedRoute && (
+                <div className="space-y-4">
+                  {simulatedRoute.error ? (
+                    <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center gap-2">
+                      <AlertTriangle size={16} className="shrink-0" />
+                      <span>{simulatedRoute.error}</span>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Summary Badges */}
+                      <div className="flex flex-wrap items-center gap-2 p-3 rounded-2xl bg-blue-500/10 border border-blue-500/20 text-xs">
+                        <span className="px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-300 font-semibold">
+                          ✓ {simulatedRoute.totalNodes} Nodes in Path
+                        </span>
+                        {simulatedRoute.crossesFloors ? (
+                          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 font-semibold flex items-center gap-1">
+                            🪜 Crosses {simulatedRoute.floorSegments.length} Floors via {simulatedRoute.connectorsUsed?.map((c) => c.type.toUpperCase()).join(', ') || 'STAIRS'}
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-1 rounded-lg bg-purple-500/20 text-purple-300 font-semibold">
+                            Single Floor Route
+                          </span>
+                        )}
+                        <span className="text-gray-400 ml-auto text-[11px]">
+                          Route highlighted on canvas
+                        </span>
+                      </div>
+
+                      {/* Turn-by-Turn Path Sequence */}
+                      <div id="route-node-sequence-list" className="rounded-2xl bg-black/40 border border-white/10 p-3 max-h-[240px] overflow-y-auto space-y-1.5">
+                        <div className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">
+                          Turn-by-Turn Path Sequence:
+                        </div>
+                        {simulatedRoute.pathNodes?.map((n, idx) => {
+                          const fl = allFloors.find((f) => f.id === n.floor_id);
+                          const prev = idx > 0 ? simulatedRoute.pathNodes[idx - 1] : null;
+                          const crossesHere = prev && prev.floor_id !== n.floor_id;
+
+                          return (
+                            <div key={n.id} className="space-y-1.5">
+                              {crossesHere && (
+                                <div className="p-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 text-xs font-bold flex items-center gap-2 my-1 shadow-md">
+                                  <span className="text-base">🪜</span>
+                                  <span>CROSS-FLOOR CONNECTOR: {allFloors.find(f => f.id === prev.floor_id)?.name || 'Floor 1'} ➔ {fl?.name || 'Floor 2'} via STAIRS</span>
+                                </div>
+                              )}
+                              <div className={`p-2 rounded-xl text-xs flex items-center justify-between ${
+                                n.floor_id === floorId ? 'bg-blue-500/15 border border-blue-500/30 text-blue-200' : 'bg-white/5 border border-white/5 text-gray-300'
+                              }`}>
+                                <div className="flex items-center gap-2">
+                                  <span className="w-5 h-5 rounded-full bg-white/10 text-gray-300 flex items-center justify-center text-[10px] font-bold">
+                                    {idx + 1}
+                                  </span>
+                                  <span className="font-semibold text-white">
+                                    {n.type === 'stairs' ? '🪜 Stairs Node' : n.type === 'room_door' ? '🚪 Door Node' : 'Corridor Node'}
+                                  </span>
+                                  <span className="text-[11px] text-gray-400">
+                                    ({fl?.name || 'Floor'})
+                                  </span>
+                                </div>
+                                <span className="text-[10px] font-mono text-gray-400">
+                                  Node ID: {n.id.slice(0, 8)}... at ({n.x}, {n.y})
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Quick Floor View Switches */}
+                      <div className="flex items-center justify-between pt-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-400">Switch Floor View:</span>
+                          {simulatedRoute.floorSegments?.map((seg) => (
+                            <button
+                              key={seg.floorId}
+                              onClick={() => {
+                                navigate(`/admin/buildings/${buildingId}/floors/${seg.floorId}/editor`);
+                              }}
+                              className={`text-xs px-3 py-1.5 rounded-xl font-medium border cursor-pointer transition-colors ${
+                                seg.floorId === floorId
+                                  ? 'bg-blue-600 text-white border-blue-500'
+                                  : 'bg-white/10 hover:bg-white/20 text-gray-300 border-white/10'
+                              }`}
+                            >
+                              {seg.floorName} {seg.floorId === floorId ? '(Active Canvas)' : ''}
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          onClick={() => setSimulatedRoute(null)}
+                          className="text-xs text-gray-400 hover:text-red-400 cursor-pointer"
+                        >
+                          Clear Route
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -3,7 +3,7 @@ import { useParams, Link, useSearchParams } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import QRScanner from '../../components/scanner/QRScanner';
 import VisitorMap from '../../components/map/VisitorMap';
-import { findShortestPath, findClosestNodeToRoom } from '../../lib/pathfinding';
+import { findShortestPath, findMultiFloorPath, findClosestNodeToRoom } from '../../lib/pathfinding';
 import { PositionTracker } from '../../lib/positioning';
 import { 
   loadOrgDataOfflineFirst, 
@@ -52,6 +52,7 @@ export default function OrgVisitorPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [destinationRoom, setDestinationRoom] = useState(null);
   const [activePath, setActivePath] = useState([]);
+  const [multiFloorRoute, setMultiFloorRoute] = useState(null);
   const [showSearch, setShowSearch] = useState(false);
   const [hasArrived, setHasArrived] = useState(false);
 
@@ -203,27 +204,64 @@ export default function OrgVisitorPage() {
     }
   }, [activeFloorId, orgData]);
 
-  // 6. Handle Routing
+  // 6. Handle Routing (Single floor or cross-floor multi-floor pathfinding)
   useEffect(() => {
     if (currentLocation && destinationRoom && mapData) {
-      if (currentLocation.floor_id !== destinationRoom.floor_id) {
-        alert("Multi-floor routing is coming soon! For now, destination must be on the same floor.");
-        setActivePath([]);
-        return;
-      }
+      const startFloorId = currentLocation.floor_id;
+      const destFloorId = destinationRoom.floor_id;
 
-      const destNode = findClosestNodeToRoom(destinationRoom, mapData.nodes);
-      if (destNode) {
-        const path = findShortestPath(currentLocation.id, destNode.id, mapData.nodes, mapData.edges);
-        if (path) {
-          setActivePath(path);
-          setHasArrived(false);
-        } else {
-          alert("No path could be found to that destination.");
+      if (startFloorId === destFloorId) {
+        // Same floor routing
+        const destNode = findClosestNodeToRoom(destinationRoom, mapData.nodes);
+        if (destNode) {
+          const path = findShortestPath(currentLocation.id, destNode.id, mapData.nodes, mapData.edges);
+          if (path) {
+            setActivePath(path);
+            setMultiFloorRoute(null);
+            setHasArrived(false);
+          } else {
+            alert("No path could be found to that destination.");
+          }
+        }
+      } else if (orgData) {
+        // Multi-floor routing across floor connectors
+        const allNodes = orgData.nodes || [];
+        const allEdges = orgData.edges || [];
+        const floorConnectors = orgData.floorConnectors || [];
+        const destFloorNodes = allNodes.filter(n => n.floor_id === destFloorId);
+        const destNode = findClosestNodeToRoom(destinationRoom, destFloorNodes);
+
+        if (destNode) {
+          const route = findMultiFloorPath({
+            startId: currentLocation.id,
+            endId: destNode.id,
+            nodes: allNodes,
+            edges: allEdges,
+            floorConnectors,
+            floors: orgData.floors || [],
+            pixelsPerMeter: mapData.floor?.real_width_m ? (mapData.floor.map_width / mapData.floor.real_width_m) : 86.0
+          });
+
+          if (route && route.path.length > 0) {
+            setMultiFloorRoute(route);
+            const currentSeg = route.floorSegments.find(s => s.floorId === activeFloorId);
+            setActivePath(currentSeg ? currentSeg.nodeIds : []);
+            setHasArrived(false);
+          } else {
+            alert("No multi-floor route could be found connecting to that room.");
+          }
         }
       }
     }
-  }, [destinationRoom, currentLocation, mapData]);
+  }, [destinationRoom, currentLocation, mapData, orgData, activeFloorId]);
+
+  // Sync activePath when activeFloorId changes during a multi-floor route
+  useEffect(() => {
+    if (multiFloorRoute && activeFloorId) {
+      const currentSeg = multiFloorRoute.floorSegments.find(s => s.floorId === activeFloorId);
+      setActivePath(currentSeg ? currentSeg.nodeIds : []);
+    }
+  }, [activeFloorId, multiFloorRoute]);
 
   // 7. Check for destination arrival
   useEffect(() => {
@@ -671,6 +709,43 @@ export default function OrgVisitorPage() {
         {activeFloorId && mapData ? (
           <div className="animate-fade-in mt-4">
             <h2 className="text-xl font-bold mb-4 text-center">{mapData.floor?.name}</h2>
+
+            {/* Multi-Floor Route Banner */}
+            {multiFloorRoute && multiFloorRoute.crossesFloors && (
+              <div className="mb-4 p-4 rounded-2xl bg-blue-500/15 border border-blue-500/30 flex flex-wrap items-center justify-between gap-3 text-sm backdrop-blur-md">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-2xl">🪜</span>
+                  <div>
+                    <div className="font-semibold text-blue-200">
+                      Multi-Floor Route Active ({multiFloorRoute.totalNodes} Nodes)
+                    </div>
+                    <div className="text-xs text-blue-300/80">
+                      {activeFloorId === currentLocation?.floor_id ? (
+                        <span>Follow the highlighted path to the stairs connector.</span>
+                      ) : (
+                        <span>Continuing from stairs connector to {destinationRoom?.name}.</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {multiFloorRoute.floorSegments.map((seg) => (
+                    <button
+                      key={seg.floorId}
+                      onClick={() => setActiveFloorId(seg.floorId)}
+                      className={`text-xs px-3 py-1.5 rounded-xl font-medium transition-colors cursor-pointer ${
+                        activeFloorId === seg.floorId
+                          ? 'bg-blue-600 text-white shadow-lg'
+                          : 'bg-white/10 hover:bg-white/20 text-gray-200'
+                      }`}
+                    >
+                      {seg.floorName} {activeFloorId === seg.floorId ? '(Viewing)' : ''}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <VisitorMap 
               rooms={mapData.rooms}
               nodes={mapData.nodes}

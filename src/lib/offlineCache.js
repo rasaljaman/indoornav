@@ -112,6 +112,7 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
   let nodes = [];
   let edges = [];
   let qrPoints = [];
+  let floorConnectors = [];
 
   if (buildingIds.length > 0) {
     // 3. Fetch all floors across buildings
@@ -154,6 +155,12 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
           .select('*')
           .in('node_id', nodeIds);
         qrPoints = qrData || [];
+
+        // 8. Fetch all floor connectors across building nodes
+        const { data: fcData } = await supabase
+          .from('floor_connectors')
+          .select('*');
+        floorConnectors = fcData || [];
       }
     }
   }
@@ -165,7 +172,8 @@ export async function fetchAllOrgDataFromSupabase(orgSlug, supabase) {
     rooms,
     nodes,
     edges,
-    qrPoints
+    qrPoints,
+    floorConnectors
   };
 }
 

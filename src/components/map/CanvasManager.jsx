@@ -191,6 +191,7 @@ export default function CanvasManager({
   gridSize = 20,
   snapEnabled = true,
   onRoomLiveUpdate,
+  routeHighlightNodeIds = [],
 }) {
   const stageRef = useRef(null);
   const containerRef = useRef(null);
@@ -251,6 +252,21 @@ export default function CanvasManager({
 
   // Smart Alignment Guides State
   const [activeGuides, setActiveGuides] = useState([]);
+
+  // Simulated / Active Route highlight segments on this floor
+  const routeSegmentsOnThisFloor = useMemo(() => {
+    if (!routeHighlightNodeIds || routeHighlightNodeIds.length < 2) return [];
+    const segments = [];
+    const nodesMap = new Map(nodes.map((n) => [n.id, n]));
+    for (let i = 0; i < routeHighlightNodeIds.length - 1; i++) {
+      const n1 = nodesMap.get(routeHighlightNodeIds[i]);
+      const n2 = nodesMap.get(routeHighlightNodeIds[i + 1]);
+      if (n1 && n2) {
+        segments.push([n1.x, n1.y, n2.x, n2.y]);
+      }
+    }
+    return segments;
+  }, [routeHighlightNodeIds, nodes]);
 
   // Load Blueprint Image
   useEffect(() => {
@@ -1844,6 +1860,33 @@ export default function CanvasManager({
             />
           )}
 
+          {/* Active Simulated Route Highlight Overlay */}
+          {routeSegmentsOnThisFloor.map((pts, idx) => (
+            <Group key={`route-seg-${idx}`} listening={false}>
+              <Line
+                points={pts}
+                stroke="rgba(59, 130, 246, 0.35)"
+                strokeWidth={14 / scale}
+                lineCap="round"
+                lineJoin="round"
+              />
+              <Line
+                points={pts}
+                stroke="#2563EB"
+                strokeWidth={5 / scale}
+                lineCap="round"
+                lineJoin="round"
+              />
+              <Line
+                points={pts}
+                stroke="#93C5FD"
+                strokeWidth={1.5 / scale}
+                lineCap="round"
+                lineJoin="round"
+              />
+            </Group>
+          ))}
+
           {/* Nodes */}
           {nodes.map((node) => {
             const hasQr = qrPoints.some((q) => q.node_id === node.id);
@@ -1851,6 +1894,7 @@ export default function CanvasManager({
             const isSelected =
               selection.id === node.id || selection.ids?.has(node.id);
             const isConnectingEdge = edgeStartNodeId === node.id;
+            const isRouteNode = routeHighlightNodeIds.includes(node.id);
 
             return (
               <Group
@@ -1863,12 +1907,12 @@ export default function CanvasManager({
                 onDragMove={(e) => handleNodeDragMove(e, node.id)}
                 onDragEnd={(e) => handleNodeDragEnd(e, node.id)}
               >
-                {(isSelected || isConnectingEdge) && (
+                {(isSelected || isConnectingEdge || isRouteNode) && (
                   <Circle
                     radius={14 / scale}
-                    fill="rgba(59, 130, 246, 0.25)"
+                    fill={isRouteNode ? 'rgba(37, 99, 235, 0.22)' : 'rgba(59, 130, 246, 0.25)'}
                     stroke="#2563EB"
-                    strokeWidth={1.5 / scale}
+                    strokeWidth={(isRouteNode ? 2 : 1.5) / scale}
                     listening={false}
                   />
                 )}
@@ -1904,6 +1948,32 @@ export default function CanvasManager({
                     fontStyle="bold"
                     listening={false}
                   />
+                )}
+
+                {isRouteNode && (node.type === 'stairs' || node.type === 'lift' || node.type === 'ramp') && (
+                  <Group y={-24 / scale} listening={false}>
+                    <Rect
+                      x={-42 / scale}
+                      y={-9 / scale}
+                      width={84 / scale}
+                      height={18 / scale}
+                      fill="#0F172A"
+                      stroke="#3B82F6"
+                      strokeWidth={1.2 / scale}
+                      cornerRadius={5 / scale}
+                    />
+                    <Text
+                      x={-40 / scale}
+                      y={-5 / scale}
+                      width={80 / scale}
+                      text={node.type === 'stairs' ? '🪜 Stairs' : node.type === 'lift' ? '🛗 Lift' : '♿ Ramp'}
+                      fontSize={8.5 / scale}
+                      fill="#60A5FA"
+                      fontStyle="bold"
+                      fontFamily="Inter, sans-serif"
+                      align="center"
+                    />
+                  </Group>
                 )}
               </Group>
             );
