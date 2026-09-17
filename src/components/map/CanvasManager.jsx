@@ -192,6 +192,8 @@ export default function CanvasManager({
   snapEnabled = true,
   onRoomLiveUpdate,
   routeHighlightNodeIds = [],
+  walkCaptureState = null,
+  onWalkAnchorSelect = null,
 }) {
   const stageRef = useRef(null);
   const containerRef = useRef(null);
@@ -800,6 +802,19 @@ export default function CanvasManager({
     let rawX = (pointerPosition.x - stage.x()) / stage.scaleX();
     let rawY = (pointerPosition.y - stage.y()) / stage.scaleY();
 
+    // Walk-to-Draw Tool: Tap canvas/elements to set Start Anchor
+    if (currentTool === 'walk') {
+      const snap = snapPointToElements(rawX, rawY);
+      if (onWalkAnchorSelect) {
+        onWalkAnchorSelect({
+          x: snap.x,
+          y: snap.y,
+          type: snap.type === 'door' ? 'room_door' : 'junction',
+        });
+      }
+      return;
+    }
+
     // Wall Tool: Continuous chaining
     if (currentTool === 'wall') {
       const snap = snapPointToElements(rawX, rawY);
@@ -1033,6 +1048,22 @@ export default function CanvasManager({
 
   const handleDoorClick = (e, doorId) => {
     e.cancelBubble = true;
+    if (currentTool === 'walk') {
+      const door = doors.find((d) => d.id === doorId);
+      const wall = door ? walls.find((w) => w.id === door.wall_id) : null;
+      if (door && wall && onWalkAnchorSelect) {
+        const t = door.position_along_wall || 0.5;
+        const x = wall.x1 + t * (wall.x2 - wall.x1);
+        const y = wall.y1 + t * (wall.y2 - wall.y1);
+        onWalkAnchorSelect({
+          x: Math.round(x),
+          y: Math.round(y),
+          doorId: door.id,
+          type: 'room_door',
+        });
+      }
+      return;
+    }
     if (currentTool === 'select' || currentTool === 'door') {
       onSelect({
         type: 'door',
@@ -1061,6 +1092,17 @@ export default function CanvasManager({
 
   const handleNodeClick = (e, node) => {
     e.cancelBubble = true;
+    if (currentTool === 'walk') {
+      if (onWalkAnchorSelect) {
+        onWalkAnchorSelect({
+          x: node.x,
+          y: node.y,
+          nodeId: node.id,
+          type: node.type || 'junction',
+        });
+      }
+      return;
+    }
     if (currentTool === 'edge') {
       if (!edgeStartNodeId) {
         setEdgeStartNodeId(node.id);
@@ -2010,6 +2052,241 @@ export default function CanvasManager({
           )}
         </Layer>
       )}
+
+        {/* 4b. WALK-TO-DRAW LIVE CAPTURE OVERLAY LAYER */}
+        {walkCaptureState?.active && (
+          <Layer listening={false}>
+            {/* 1. Start Anchor Ring, Direction Arrow & Label */}
+            {walkCaptureState.startAnchor && (
+              <Group>
+                {/* Pulsing halo */}
+                <Circle
+                  x={walkCaptureState.startAnchor.x}
+                  y={walkCaptureState.startAnchor.y}
+                  radius={18 / scale}
+                  stroke="#EC4899"
+                  strokeWidth={2 / scale}
+                  dash={[4 / scale, 3 / scale]}
+                  fill="rgba(236, 72, 153, 0.16)"
+                />
+                {/* Center anchor pin */}
+                <Circle
+                  x={walkCaptureState.startAnchor.x}
+                  y={walkCaptureState.startAnchor.y}
+                  radius={6 / scale}
+                  fill="#EC4899"
+                  stroke="#FFFFFF"
+                  strokeWidth={2 / scale}
+                />
+                {/* Start badge */}
+                <Text
+                  x={walkCaptureState.startAnchor.x - 50 / scale}
+                  y={walkCaptureState.startAnchor.y - 28 / scale}
+                  width={100 / scale}
+                  align="center"
+                  text="📍 START ANCHOR"
+                  fontSize={9 / scale}
+                  fill="#F472B6"
+                  fontStyle="bold"
+                  fontFamily="Inter, sans-serif"
+                />
+                {/* Facing Direction Pointer Arrow */}
+                {(() => {
+                  const angle = walkCaptureState.facingAngle || 0;
+                  const rad = ((angle - 90) * Math.PI) / 180;
+                  const len = 38 / scale;
+                  const tx = walkCaptureState.startAnchor.x + Math.cos(rad) * len;
+                  const ty = walkCaptureState.startAnchor.y + Math.sin(rad) * len;
+                  return (
+                    <Group>
+                      <Line
+                        points={[
+                          walkCaptureState.startAnchor.x,
+                          walkCaptureState.startAnchor.y,
+                          tx,
+                          ty,
+                        ]}
+                        stroke="#EC4899"
+                        strokeWidth={2.5 / scale}
+                        lineCap="round"
+                      />
+                      <Circle
+                        x={tx}
+                        y={ty}
+                        radius={3.5 / scale}
+                        fill="#EC4899"
+                        stroke="#FFFFFF"
+                        strokeWidth={1 / scale}
+                      />
+                    </Group>
+                  );
+                })()}
+              </Group>
+            )}
+
+            {/* 2. Raw Live Trail Polyline */}
+            {walkCaptureState.trailPoints && walkCaptureState.trailPoints.length > 1 && (
+              <Group>
+                {/* Trail Outer Glow */}
+                <Line
+                  points={walkCaptureState.trailPoints.flatMap((p) => [p.x, p.y])}
+                  stroke="rgba(244, 63, 94, 0.25)"
+                  strokeWidth={8 / scale}
+                  lineCap="round"
+                  lineJoin="round"
+                />
+                {/* Trail Core Line */}
+                <Line
+                  points={walkCaptureState.trailPoints.flatMap((p) => [p.x, p.y])}
+                  stroke="#F43F5E"
+                  strokeWidth={3 / scale}
+                  lineCap="round"
+                  lineJoin="round"
+                  dash={walkCaptureState.phase === 'review' && walkCaptureState.useDriftCorrection ? [5 / scale, 5 / scale] : undefined}
+                />
+              </Group>
+            )}
+
+            {/* 2b. Corrected Trail Polyline (in Review mode) */}
+            {walkCaptureState.phase === 'review' &&
+              walkCaptureState.useDriftCorrection &&
+              walkCaptureState.correctedData?.correctedTrail &&
+              walkCaptureState.correctedData.correctedTrail.length > 1 && (
+                <Group>
+                  <Line
+                    points={walkCaptureState.correctedData.correctedTrail.flatMap((p) => [p.x, p.y])}
+                    stroke="rgba(16, 185, 129, 0.25)"
+                    strokeWidth={9 / scale}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                  <Line
+                    points={walkCaptureState.correctedData.correctedTrail.flatMap((p) => [p.x, p.y])}
+                    stroke="#10B981"
+                    strokeWidth={3.5 / scale}
+                    lineCap="round"
+                    lineJoin="round"
+                  />
+                </Group>
+              )}
+
+            {/* 3. Waypoint Pins */}
+            {(walkCaptureState.phase === 'review' && walkCaptureState.useDriftCorrection && walkCaptureState.correctedData?.correctedWaypoints
+              ? walkCaptureState.correctedData.correctedWaypoints
+              : walkCaptureState.waypoints || []
+            ).map((wp, idx) => {
+              const color =
+                wp.type === 'stairs'
+                  ? '#F97316'
+                  : wp.type === 'room_door'
+                  ? '#10B981'
+                  : wp.type === 'entrance'
+                  ? '#EF4444'
+                  : '#3B82F6';
+              const letter =
+                wp.type === 'stairs'
+                  ? 'S'
+                  : wp.type === 'room_door'
+                  ? 'D'
+                  : wp.type === 'entrance'
+                  ? 'E'
+                  : 'J';
+
+              return (
+                <Group key={`walk-wp-${wp.id || idx}`} x={wp.x} y={wp.y}>
+                  <Circle
+                    radius={10 / scale}
+                    fill={color}
+                    stroke="#FFFFFF"
+                    strokeWidth={2 / scale}
+                    shadowColor="rgba(0,0,0,0.5)"
+                    shadowBlur={4 / scale}
+                  />
+                  <Text
+                    x={-6 / scale}
+                    y={-5 / scale}
+                    width={12 / scale}
+                    align="center"
+                    text={letter}
+                    fontSize={9 / scale}
+                    fill="#FFFFFF"
+                    fontStyle="bold"
+                    fontFamily="Inter, sans-serif"
+                  />
+                  <Text
+                    x={-30 / scale}
+                    y={-22 / scale}
+                    width={60 / scale}
+                    align="center"
+                    text={`#${idx + 1}`}
+                    fontSize={8 / scale}
+                    fill="#F1F5F9"
+                    fontStyle="bold"
+                    fontFamily="Inter, sans-serif"
+                  />
+                </Group>
+              );
+            })}
+
+            {/* 4. Live Walking Position Beacon & Heading Wedge */}
+            {walkCaptureState.phase === 'walking' && walkCaptureState.currentPos && (
+              <Group x={walkCaptureState.currentPos.x} y={walkCaptureState.currentPos.y}>
+                {/* Radar Pulse Halo */}
+                <Circle
+                  radius={18 / scale}
+                  fill="rgba(59, 130, 246, 0.25)"
+                  stroke="#3B82F6"
+                  strokeWidth={1.5 / scale}
+                />
+                {/* Core Dot */}
+                <Circle
+                  radius={7 / scale}
+                  fill="#2563EB"
+                  stroke="#FFFFFF"
+                  strokeWidth={2.5 / scale}
+                />
+                {/* Heading Direction Ray */}
+                {(() => {
+                  const hAngle = walkCaptureState.currentHeading || 0;
+                  const hRad = ((hAngle - 90) * Math.PI) / 180;
+                  const dist = 26 / scale;
+                  return (
+                    <Line
+                      points={[0, 0, Math.cos(hRad) * dist, Math.sin(hRad) * dist]}
+                      stroke="#38BDF8"
+                      strokeWidth={3 / scale}
+                      lineCap="round"
+                    />
+                  );
+                })()}
+              </Group>
+            )}
+
+            {/* 5. Snap Candidate Target Ring in Review Mode */}
+            {walkCaptureState.phase === 'review' && walkCaptureState.snappedEndNode && (
+              <Group x={walkCaptureState.snappedEndNode.x} y={walkCaptureState.snappedEndNode.y}>
+                <Circle
+                  radius={16 / scale}
+                  stroke="#10B981"
+                  strokeWidth={2.5 / scale}
+                  dash={[4 / scale, 3 / scale]}
+                  fill="rgba(16, 185, 129, 0.2)"
+                />
+                <Text
+                  x={-50 / scale}
+                  y={-24 / scale}
+                  width={100 / scale}
+                  align="center"
+                  text="🎯 SNAPPED END"
+                  fontSize={8.5 / scale}
+                  fill="#34D399"
+                  fontStyle="bold"
+                  fontFamily="Inter, sans-serif"
+                />
+              </Group>
+            )}
+          </Layer>
+        )}
 
         {/* 5. SMART ALIGNMENT GUIDES LAYER */}
         <Layer listening={false}>

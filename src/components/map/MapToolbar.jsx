@@ -17,6 +17,7 @@ import {
   Layers,
   Eye,
   EyeOff,
+  Footprints,
 } from 'lucide-react';
 
 const NODE_TYPES = [
@@ -59,6 +60,7 @@ export default function MapToolbar({
     { id: 'room', icon: Square, label: 'Draw Room (R)' },
     { id: 'node', icon: Circle, label: 'Add Node (N)' },
     { id: 'edge', icon: TrendingUp, label: 'Draw Path (P)' },
+    { id: 'walk', icon: Footprints, label: 'Walk to Draw (K)' },
     { id: 'scale', icon: Scaling, label: 'Calibrate Scale (S)' },
     { id: 'qr', icon: QrCode, label: 'Assign QR Anchor (Q)' },
   ];

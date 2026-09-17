@@ -6,6 +6,7 @@ import MapToolbar from '../../components/map/MapToolbar';
 import CanvasManager from '../../components/map/CanvasManager';
 import ElementPropertiesPanel from '../../components/map/ElementPropertiesPanel';
 import { ScaleCalibrationModal, BlueprintUploadModal } from '../../components/map/MapModals';
+import WalkCapturePanel from '../../components/map/WalkCapturePanel';
 import { useMapHistory } from '../../hooks/useMapHistory';
 import { validateGraph } from '../../lib/graphValidation';
 import { findMultiFloorPath, findClosestNodeToRoom } from '../../lib/pathfinding';
@@ -71,6 +72,18 @@ export default function MapEditor() {
   const [routeStart, setRouteStart] = useState({ floorId: '', type: 'room', id: '' });
   const [routeEnd, setRouteEnd] = useState({ floorId: '', type: 'room', id: '' });
   const [simulatedRoute, setSimulatedRoute] = useState(null);
+
+  // Walk-to-Draw Live Corridor Path Capture State
+  const [walkStartAnchor, setWalkStartAnchor] = useState(null); // { x, y, nodeId, doorId, type }
+  const [walkFacingAngle, setWalkFacingAngle] = useState(0);
+  const [walkTrailPoints, setWalkTrailPoints] = useState([]);
+  const [walkWaypoints, setWalkWaypoints] = useState([]);
+  const [walkCurrentPos, setWalkCurrentPos] = useState(null);
+  const [walkCurrentHeading, setWalkCurrentHeading] = useState(0);
+  const [walkPhase, setWalkPhase] = useState('setup');
+  const [walkCorrectedData, setWalkCorrectedData] = useState(null);
+  const [walkSnappedEndNode, setWalkSnappedEndNode] = useState(null);
+  const [walkUseDriftCorrection, setWalkUseDriftCorrection] = useState(true);
 
   // Modals state
   const [calibrationPts, setCalibrationPts] = useState(null); // [x1, y1, x2, y2]
@@ -569,6 +582,9 @@ export default function MapEditor() {
           case 'q':
             setCurrentTool('qr');
             break;
+          case 'k':
+            setCurrentTool('walk');
+            break;
           default:
             break;
         }
@@ -852,6 +868,93 @@ export default function MapEditor() {
       setSaving(false);
     }
   };
+
+  // Commit Walk-to-Draw path capture: creates new nodes & weighted edges and pushes to history
+  const handleCommitWalkPath = ({
+    waypoints = [],
+    rawTrail = [],
+    correctedTrail = null,
+    snappedEndNode = null,
+    startAnchor = null,
+  }) => {
+    if (!waypoints || waypoints.length === 0) return;
+
+    const createdNodes = [];
+    const nodeSequence = [];
+
+    for (let i = 0; i < waypoints.length; i++) {
+      const wp = waypoints[i];
+
+      // If first waypoint is an existing anchor node, reuse it
+      if (i === 0 && startAnchor?.nodeId) {
+        const existingStart = nodes.find((n) => n.id === startAnchor.nodeId);
+        if (existingStart) {
+          nodeSequence.push(existingStart);
+          continue;
+        }
+      }
+
+      // If last waypoint snapped to an existing node, reuse it
+      if (i === waypoints.length - 1 && snappedEndNode) {
+        const existingEnd = nodes.find((n) => n.id === snappedEndNode.id) || snappedEndNode;
+        nodeSequence.push(existingEnd);
+        continue;
+      }
+
+      const newNode = {
+        id: crypto.randomUUID(),
+        floor_id: floorId,
+        x: Math.round(wp.x),
+        y: Math.round(wp.y),
+        type: wp.type || 'junction',
+      };
+      createdNodes.push(newNode);
+      nodeSequence.push(newNode);
+    }
+
+    // Generate edges connecting consecutive nodes in sequence
+    const createdEdges = [];
+    const ppm = pixelsPerMeter > 1 ? pixelsPerMeter : 1;
+
+    for (let i = 0; i < nodeSequence.length - 1; i++) {
+      const na = nodeSequence[i];
+      const nb = nodeSequence[i + 1];
+      if (!na || !nb || na.id === nb.id) continue;
+
+      const exists = [...edges, ...createdEdges].some(
+        (e) => (e.from_node === na.id && e.to_node === nb.id) || (e.from_node === nb.id && e.to_node === na.id)
+      );
+
+      if (!exists) {
+        const pDist = Math.hypot(nb.x - na.x, nb.y - na.y);
+        const realWeight = Math.round((pDist / ppm) * 100) / 100;
+        createdEdges.push({
+          id: crypto.randomUUID(),
+          from_node: na.id,
+          to_node: nb.id,
+          weight: realWeight,
+        });
+      }
+    }
+
+    // Push into map history for single-step Ctrl+Z undo/redo
+    pushState((prev) => ({
+      ...prev,
+      nodes: [...prev.nodes, ...createdNodes],
+      edges: [...prev.edges, ...createdEdges],
+    }), `Walk-to-draw: added ${createdNodes.length} nodes, ${createdEdges.length} edges`);
+
+    // Reset walk capture state & return to select tool
+    setCurrentTool('select');
+    setWalkStartAnchor(null);
+    setWalkTrailPoints([]);
+    setWalkWaypoints([]);
+    setWalkCurrentPos(null);
+    setWalkPhase('setup');
+    setWalkCorrectedData(null);
+    setWalkSnappedEndNode(null);
+  };
+
   handleSaveRef.current = handleSave;
 
   if (loading) {
@@ -1113,6 +1216,22 @@ export default function MapEditor() {
         snapEnabled={snapEnabled}
         onRoomLiveUpdate={setLiveReshapingRoom}
         routeHighlightNodeIds={simulatedRoute?.path || []}
+        walkCaptureState={{
+          active: currentTool === 'walk',
+          startAnchor: walkStartAnchor,
+          facingAngle: walkFacingAngle,
+          trailPoints: walkTrailPoints,
+          waypoints: walkWaypoints,
+          currentPos: walkCurrentPos,
+          currentHeading: walkCurrentHeading,
+          phase: walkPhase,
+          useDriftCorrection: walkUseDriftCorrection,
+          correctedData: walkCorrectedData,
+          snappedEndNode: walkSnappedEndNode,
+        }}
+        onWalkAnchorSelect={(anchor) => {
+          setWalkStartAnchor(anchor);
+        }}
       />
 
       {/* Unified Element Properties Inspector Panel */}
@@ -1209,6 +1328,39 @@ export default function MapEditor() {
           </div>
         </div>
       )}
+
+      {/* Walk-to-Draw Mobile-First Path Capture Floating Panel */}
+      <WalkCapturePanel
+        active={currentTool === 'walk'}
+        startAnchor={walkStartAnchor}
+        facingAngle={walkFacingAngle}
+        onSetFacingAngle={setWalkFacingAngle}
+        pixelsPerMeter={pixelsPerMeter}
+        existingNodes={nodes}
+        onUpdateTrail={(trail, wps, pos, heading, extra) => {
+          setWalkTrailPoints(trail);
+          setWalkWaypoints(wps);
+          setWalkCurrentPos(pos);
+          setWalkCurrentHeading(heading);
+          if (extra) {
+            if (extra.phase) setWalkPhase(extra.phase);
+            if (extra.correctedData !== undefined) setWalkCorrectedData(extra.correctedData);
+            if (extra.snappedEndNode !== undefined) setWalkSnappedEndNode(extra.snappedEndNode);
+            if (extra.useDriftCorrection !== undefined) setWalkUseDriftCorrection(extra.useDriftCorrection);
+          }
+        }}
+        onCommitPath={handleCommitWalkPath}
+        onCancel={() => {
+          setCurrentTool('select');
+          setWalkStartAnchor(null);
+          setWalkTrailPoints([]);
+          setWalkWaypoints([]);
+          setWalkCurrentPos(null);
+          setWalkPhase('setup');
+          setWalkCorrectedData(null);
+          setWalkSnappedEndNode(null);
+        }}
+      />
 
       {/* Scale Calibration Dialog */}
       {calibrationPts && (

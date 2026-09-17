@@ -405,4 +405,118 @@ export class PositionTracker {
     this.heading = (this.heading + deltaDegrees + 360) % 360;
     this.notifyUpdate();
   }
+
+  /**
+   * Set heading calibration offset (to align compass with canvas orientation)
+   */
+  setHeadingOffset(offsetDegrees = 0) {
+    this.headingOffset = offsetDegrees;
+  }
+
+  /**
+   * Reset tracking state for a new capture session
+   */
+  reset(x = 0, y = 0, heading = 0) {
+    this.rawPosition = { x, y };
+    this.snappedPosition = { x, y };
+    this.heading = heading;
+    this.compassHeading = heading;
+    this.stepCount = 0;
+    this.hasInitialPosition = true;
+    this.lastStepTime = 0;
+  }
+}
+
+/**
+ * Applies a linear conformal transformation (uniform scale + 2D rotation + translation)
+ * across a recorded trail and its dropped waypoints, stretching smoothly from startAnchor to endAnchor.
+ *
+ * This uniformly distributes dead-reckoning drift along the entire path rather than leaving an error jump.
+ *
+ * @param {Object} startAnchor - { x, y } fixed start coordinate
+ * @param {Object} endAnchor - { x, y } target end coordinate to snap to
+ * @param {Array} rawTrailPoints - [{ x, y }] raw step points
+ * @param {Array} waypoints - [{ id, x, y, type, ... }] dropped waypoints
+ * @returns {Object} { correctedTrail: [{ x, y }], correctedWaypoints: [...] }
+ */
+export function applyLinearDriftCorrection(startAnchor, endAnchor, rawTrailPoints = [], waypoints = []) {
+  if (!startAnchor || !endAnchor) {
+    return { correctedTrail: rawTrailPoints, correctedWaypoints: waypoints };
+  }
+
+  const Ax = startAnchor.x;
+  const Ay = startAnchor.y;
+  const Bx = endAnchor.x;
+  const By = endAnchor.y;
+
+  // Determine the raw endpoint
+  let rawEnd = rawTrailPoints.length > 0
+    ? rawTrailPoints[rawTrailPoints.length - 1]
+    : (waypoints.length > 0 ? waypoints[waypoints.length - 1] : null);
+
+  if (!rawEnd) {
+    return { correctedTrail: rawTrailPoints, correctedWaypoints: waypoints };
+  }
+
+  const rawDx = rawEnd.x - Ax;
+  const rawDy = rawEnd.y - Ay;
+  const rawDist = Math.hypot(rawDx, rawDy);
+
+  const tgtDx = Bx - Ax;
+  const tgtDy = By - Ay;
+  const tgtDist = Math.hypot(tgtDx, tgtDy);
+
+  // If raw movement is negligible, simply pin to endAnchor
+  if (rawDist < 1e-3 || tgtDist < 1e-3) {
+    return {
+      correctedTrail: rawTrailPoints.map((p) => ({ x: Bx, y: By })),
+      correctedWaypoints: waypoints.map((w) => ({ ...w, x: Bx, y: By })),
+    };
+  }
+
+  const rawAngle = Math.atan2(rawDy, rawDx);
+  const tgtAngle = Math.atan2(tgtDy, tgtDx);
+  const deltaAngle = tgtAngle - rawAngle;
+  const scale = tgtDist / rawDist;
+
+  const cosA = Math.cos(deltaAngle);
+  const sinA = Math.sin(deltaAngle);
+
+  // Transformation function: P' = A + scale * R(deltaAngle) * (P - A)
+  const transformPoint = (px, py) => {
+    const rx = px - Ax;
+    const ry = py - Ay;
+    const rotX = rx * cosA - ry * sinA;
+    const rotY = rx * sinA + ry * cosA;
+    return {
+      x: Math.round((Ax + scale * rotX) * 10) / 10,
+      y: Math.round((Ay + scale * rotY) * 10) / 10,
+    };
+  };
+
+  const correctedTrail = rawTrailPoints.map((pt) => transformPoint(pt.x, pt.y));
+  const correctedWaypoints = waypoints.map((wp) => {
+    const transformed = transformPoint(wp.x, wp.y);
+    return {
+      ...wp,
+      x: transformed.x,
+      y: transformed.y,
+    };
+  });
+
+  // Ensure end matches target anchor precisely
+  if (correctedTrail.length > 0) {
+    correctedTrail[correctedTrail.length - 1] = { x: Bx, y: By };
+  }
+  if (correctedWaypoints.length > 0) {
+    const lastWp = correctedWaypoints[correctedWaypoints.length - 1];
+    correctedWaypoints[correctedWaypoints.length - 1] = { ...lastWp, x: Bx, y: By };
+  }
+
+  return {
+    correctedTrail,
+    correctedWaypoints,
+    scaleFactor: Math.round(scale * 100) / 100,
+    rotationDegrees: Math.round((deltaAngle * 180 / Math.PI) * 10) / 10,
+  };
 }
