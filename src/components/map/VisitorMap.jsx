@@ -471,25 +471,19 @@ export default function VisitorMap({
             </Group>
           )}
 
-          {/* Rooms */}
-          {rooms.map((room) => {
-            const style = THEME.rooms[room.category] || THEME.rooms.other;
-            const pts = room.shape_data
-              ? typeof room.shape_data[0] === 'number'
-                ? room.shape_data
-                : room.shape_data.flat()
-              : [];
-            const center = getRoomCenter(room);
+          {/* Rooms - Pass 1: Polygons */}
+          <Group id="room-polygons">
+            {rooms.map((room) => {
+              const style = THEME.rooms[room.category] || THEME.rooms.other;
+              const pts = room.shape_data
+                ? typeof room.shape_data[0] === 'number'
+                  ? room.shape_data
+                  : room.shape_data.flat()
+                : [];
 
-            // Responsive font sizing: scales naturally with zoom,
-            // clamped to 10.5px-15px equivalent screen size so it is always crisp, legible and never huge
-            const screenFontSize = Math.max(10.5, Math.min(15, 12 * Math.sqrt(scale)));
-            const canvasFontSize = screenFontSize / scale;
-            const labelWidth = Math.max(120 / scale, (room.name?.length || 0) * canvasFontSize * 0.75);
-
-            return (
-              <Group key={room.id}>
+              return (
                 <Line
+                  key={`room-poly-${room.id}`}
                   points={pts}
                   fill={room.color || style.fill}
                   stroke={style.stroke}
@@ -498,24 +492,41 @@ export default function VisitorMap({
                   opacity={0.88}
                   tension={0}
                 />
-                {room.name && center && (
-                  <Text
-                    x={center.x - labelWidth / 2}
-                    y={center.y - canvasFontSize * 0.55}
-                    width={labelWidth}
-                    align="center"
-                    verticalAlign="middle"
-                    text={room.name}
-                    fontSize={canvasFontSize}
-                    fill="#1F2937"
-                    fontFamily="Inter, sans-serif"
-                    fontStyle="600"
-                    listening={false}
-                  />
-                )}
-              </Group>
-            );
-          })}
+              );
+            })}
+          </Group>
+
+          {/* Rooms - Pass 2: Labels (rendered above all polygons to guarantee crisp contrast and prevent occlusion) */}
+          <Group id="room-labels">
+            {rooms.map((room) => {
+              if (!room.name) return null;
+              const center = getRoomCenter(room);
+              if (!center) return null;
+
+              // Responsive font sizing: scales naturally with zoom,
+              // clamped to 10.5px-15px equivalent screen size so it is always crisp, legible and never huge
+              const screenFontSize = Math.max(10.5, Math.min(15, 12 * Math.sqrt(scale)));
+              const canvasFontSize = screenFontSize / scale;
+              const labelWidth = Math.max(120 / scale, (room.name?.length || 0) * canvasFontSize * 0.75);
+
+              return (
+                <Text
+                  key={`room-label-${room.id}`}
+                  x={center.x - labelWidth / 2}
+                  y={center.y - canvasFontSize * 0.55}
+                  width={labelWidth}
+                  align="center"
+                  verticalAlign="middle"
+                  text={room.name}
+                  fontSize={canvasFontSize}
+                  fill="#1F2937"
+                  fontFamily="Inter, sans-serif"
+                  fontStyle="600"
+                  listening={false}
+                />
+              );
+            })}
+          </Group>
 
           {/* Active Route Overlay (Shortening behind the user) */}
           {routePoints.length > 2 && (
