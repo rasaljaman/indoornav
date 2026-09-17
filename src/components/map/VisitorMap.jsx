@@ -471,32 +471,50 @@ export default function VisitorMap({
             </Group>
           )}
 
-          {/* Rooms - Pass 1: Polygons */}
+          {/* Rooms - Pass 1: Polygons (sorted by area descending so larger rooms render first and smaller embedded rooms like baths render on top) */}
           <Group id="room-polygons">
-            {rooms.map((room) => {
-              const style = THEME.rooms[room.category] || THEME.rooms.other;
-              const pts = room.shape_data
-                ? typeof room.shape_data[0] === 'number'
-                  ? room.shape_data
-                  : room.shape_data.flat()
-                : [];
+            {[...rooms]
+              .sort((a, b) => {
+                const getArea = (r) => {
+                  if (!r.shape_data) return 0;
+                  const pts = typeof r.shape_data[0] === 'number' ? r.shape_data : r.shape_data.flat();
+                  if (pts.length < 6) return 0;
+                  let area = 0;
+                  for (let i = 0; i < pts.length; i += 2) {
+                    const x1 = pts[i];
+                    const y1 = pts[i + 1];
+                    const x2 = pts[(i + 2) % pts.length];
+                    const y2 = pts[(i + 3) % pts.length];
+                    area += x1 * y2 - x2 * y1;
+                  }
+                  return Math.abs(area) / 2;
+                };
+                return getArea(b) - getArea(a);
+              })
+              .map((room) => {
+                const style = THEME.rooms[room.category] || THEME.rooms.other;
+                const pts = room.shape_data
+                  ? typeof room.shape_data[0] === 'number'
+                    ? room.shape_data
+                    : room.shape_data.flat()
+                  : [];
 
-              return (
-                <Line
-                  key={`room-poly-${room.id}`}
-                  points={pts}
-                  fill={room.color || style.fill}
-                  stroke={style.stroke}
-                  strokeWidth={2 / scale}
-                  closed
-                  opacity={0.88}
-                  tension={0}
-                />
-              );
-            })}
+                return (
+                  <Line
+                    key={`room-poly-${room.id}`}
+                    points={pts}
+                    fill={room.color || style.fill}
+                    stroke={style.stroke}
+                    strokeWidth={2 / scale}
+                    closed
+                    opacity={0.88}
+                    tension={0}
+                  />
+                );
+              })}
           </Group>
 
-          {/* Rooms - Pass 2: Labels (rendered above all polygons to guarantee crisp contrast and prevent occlusion) */}
+          {/* Rooms - Pass 2: Labels (rendered in dedicated group above all room polygons for maximum contrast) */}
           <Group id="room-labels">
             {rooms.map((room) => {
               if (!room.name) return null;
@@ -504,8 +522,8 @@ export default function VisitorMap({
               if (!center) return null;
 
               // Responsive font sizing: scales naturally with zoom,
-              // clamped to 10.5px-15px equivalent screen size so it is always crisp, legible and never huge
-              const screenFontSize = Math.max(10.5, Math.min(15, 12 * Math.sqrt(scale)));
+              // clamped to 11px-15px equivalent screen size so it is always crisp, legible and never huge
+              const screenFontSize = Math.max(11, Math.min(15, 12 * Math.sqrt(scale)));
               const canvasFontSize = screenFontSize / scale;
               const labelWidth = Math.max(120 / scale, (room.name?.length || 0) * canvasFontSize * 0.75);
 
@@ -519,9 +537,9 @@ export default function VisitorMap({
                   verticalAlign="middle"
                   text={room.name}
                   fontSize={canvasFontSize}
-                  fill="#1F2937"
-                  fontFamily="Inter, sans-serif"
-                  fontStyle="600"
+                  fill="#111827"
+                  fontFamily="Inter, system-ui, -apple-system, sans-serif"
+                  fontStyle="bold"
                   listening={false}
                 />
               );
